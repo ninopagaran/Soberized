@@ -8,6 +8,7 @@ pub mod protocol;
 pub mod sandbox;
 pub mod schedule;
 pub mod sober;
+pub mod units;
 
 pub const APP_ID: &str = "org.vinegarhq.Sober";
 pub const SOCKET_PATH: &str = "/run/soberized/control.sock";

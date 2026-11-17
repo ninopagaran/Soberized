@@ -24,6 +24,12 @@ started as a dynamic unprivileged user, with no Linux capabilities. No udev
 permission changes, broad group membership, setuid executable, or persistent
 Flatpak override is installed.
 
+The closed device cgroup explicitly allows `/dev/uinput rw` so systemd can
+prepare the inherited handle before entering the private device namespace.
+`PrivateDevices=yes` remains enabled; this allowance does not expose a device
+path to the running helper or grant permissions to the desktop account. The
+runtime filter still forbids reopening/reconfiguring devices after setup.
+
 The helper verifies named activation descriptors, the Linux uinput character
 device major/minor (`10:223`), and the listener's domain/type/listening state.
 It creates a fixed libevdev descriptor containing gamepad buttons and absolute

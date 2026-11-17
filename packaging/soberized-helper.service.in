@@ -18,6 +18,11 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 PrivateDevices=yes
+# PrivateDevices closes the device cgroup before OpenFile handles are prepared.
+# Allow only this device; the private /dev and runtime syscall filter still hide
+# and prevent reopening it after the fixed controller has been configured.
+DevicePolicy=closed
+DeviceAllow=/dev/uinput rw
 PrivateNetwork=yes
 PrivateTmp=yes
 ProtectSystem=strict

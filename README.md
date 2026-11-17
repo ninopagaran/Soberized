@@ -141,8 +141,23 @@ journalctl -u soberized-helper.service -b
 soberized doctor
 ```
 
-If repeated startup failures hit systemd's rate limit, fix the reported cause,
-then run `sudo systemctl reset-failed soberized-helper.service`.
+Closing Sober without `soberized stop` ends its input lease automatically. The
+helper socket stays available for a later launch. If `status` reports a failed
+helper or socket, inspect the journal; restarting the CLI does not repair a
+service startup failure.
+
+After correcting a startup failure, clear both failed units and restart the socket:
+
+```sh
+sudo systemctl reset-failed soberized-helper.service soberized-helper.socket
+sudo systemctl restart soberized-helper.socket
+```
+
+For an older installation reporting `Failed at step FDS` and permission denied
+opening `/dev/uinput`, rebuild and rerun the current installer. The helper needs
+the narrow `DeviceAllow=/dev/uinput rw` cgroup allowance alongside `OpenFile=`;
+its private device namespace and runtime syscall filter remain enabled. The
+installer clears old failure counters after updating the service definitions.
 
 ## Remove
 

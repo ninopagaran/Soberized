@@ -47,5 +47,6 @@ systemd-analyze verify /etc/systemd/system/soberized-helper.socket /etc/systemd/
 [ ! -L /run/soberized ] || fail '/run/soberized must not be a symlink'
 install -d -m755 -o root -g root /run/soberized
 systemctl daemon-reload
+systemctl reset-failed soberized-helper.service soberized-helper.socket
 systemctl enable --now soberized-helper.socket
 printf '%s\n' 'Installed. As your desktop user, run:' '  systemctl --user daemon-reload' '  soberized doctor --sandbox-test' 'Then enable gamepad access in Sober Settings and follow docs/VALIDATION.md.'

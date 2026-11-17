@@ -1,5 +1,6 @@
 use soberized::ipc::Client;
 use soberized::protocol::{Command as Operation, ReplyCode, State};
+use soberized::units::{self, SOCKET_UNIT};
 use soberized::{APP_ID, HELPER_PATH, HELPER_UNIT, SOCKET_PATH, USER_UNIT, helper, sober};
 use std::io;
 use std::os::unix::fs::FileTypeExt;
@@ -79,11 +80,18 @@ fn control_service(action: &str) -> io::Result<()> {
 }
 
 fn installed() -> io::Result<()> {
-    let metadata = std::fs::symlink_metadata(SOCKET_PATH).map_err(|_| {
-        io::Error::other(
-            "helper socket is unavailable; install Soberized and enable soberized-helper.socket",
-        )
-    })?;
+    let helper = units::query(false, HELPER_UNIT)?;
+    let socket = units::query(false, SOCKET_UNIT)?;
+    let metadata = match std::fs::symlink_metadata(SOCKET_PATH) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(problem) = units::backend_problem(&helper, &socket, metadata.is_some()) {
+        return Err(io::Error::other(problem));
+    }
+    let metadata =
+        metadata.ok_or_else(|| io::Error::other("helper socket disappeared; retry the command"))?;
     if !metadata.file_type().is_socket() {
         return Err(io::Error::other("control path is not a socket"));
     }
@@ -115,6 +123,14 @@ fn stop() -> io::Result<()> {
 }
 
 fn status() -> io::Result<()> {
+    installed()?;
+    let session = units::query(true, USER_UNIT)?;
+    if session.failed() {
+        return Err(io::Error::other(format!(
+            "session controller failed ({}); inspect journalctl --user -u {USER_UNIT} -b",
+            session.result
+        )));
+    }
     let controller = unit_active(true, USER_UNIT);
     if !unit_active(false, HELPER_UNIT) {
         println!(
@@ -231,8 +247,8 @@ fn doctor(sandbox_test: bool) -> io::Result<()> {
     }
     match installed() {
         Ok(()) => println!("Helper socket: installed"),
-        Err(_) => {
-            println!("Helper socket: unavailable (installation required)");
+        Err(error) => {
+            println!("Helper socket: {error}");
             ready = false;
         }
     }
@@ -303,7 +319,7 @@ fn doctor(sandbox_test: bool) -> io::Result<()> {
     }
     if !ready {
         return Err(io::Error::other(
-            "installation is incomplete; see README.md",
+            "Soberized is not ready; resolve the issues reported above",
         ));
     }
     Ok(())
