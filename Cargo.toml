@@ -1,0 +1,28 @@
+[package]
+name = "soberized"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A restricted, local anti-idle companion for Sober on Arch Linux/Sway"
+license = "MIT"
+publish = false
+
+[dependencies]
+libc = "=0.2.189"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[[bin]]
+name = "soberized"
+path = "src/main.rs"
+
+[[bin]]
+name = "soberized-helper"
+path = "src/bin/helper.rs"

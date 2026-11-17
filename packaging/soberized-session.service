@@ -1,0 +1,17 @@
+[Unit]
+Description=Soberized controller for the current Sober instance
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/soberized session
+Restart=no
+TimeoutStopSec=3s
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+UMask=0077
+StandardInput=null
+StandardOutput=journal
+StandardError=journal

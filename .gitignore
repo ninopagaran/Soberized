@@ -1,0 +1,11 @@
+/target/
+/dist/
+*.pkg.tar.*
+/pkg/
+/.aws/
+/.codex/
+/.agents/
+.env
+.env.*
+!.env.example
+!.env.sample

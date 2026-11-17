@@ -1,0 +1,15 @@
+[Unit]
+Description=Soberized private local control socket
+
+[Socket]
+ListenSequentialPacket=/run/soberized/control.sock
+FileDescriptorName=control
+SocketUser=@OWNER@
+SocketMode=0600
+DirectoryMode=0755
+Backlog=8
+RemoveOnStop=yes
+Service=soberized-helper.service
+
+[Install]
+WantedBy=sockets.target
