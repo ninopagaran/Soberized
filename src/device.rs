@@ -9,6 +9,7 @@ const EV_SYN: u32 = 0;
 const EV_KEY: u32 = 1;
 const EV_ABS: u32 = 3;
 const ABS_X: u32 = 0;
+const BTN_SELECT: u32 = 0x13a;
 const BUTTONS: &[u32] = &[
     0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e,
 ];
@@ -63,6 +64,7 @@ fn checked(result: c_int) -> io::Result<()> {
 
 pub trait Output {
     fn pulse(&mut self, amplitude: i32) -> io::Result<()>;
+    fn select_ui(&mut self) -> io::Result<()>;
     fn neutral(&mut self) -> io::Result<()>;
 }
 
@@ -120,6 +122,11 @@ impl Gamepad {
 }
 
 impl Output for Gamepad {
+    fn select_ui(&mut self) -> io::Result<()> {
+        self.event(EV_KEY, BTN_SELECT, 1)?;
+        self.event(EV_SYN, 0, 0)
+    }
+
     fn pulse(&mut self, amplitude: i32) -> io::Result<()> {
         if amplitude != crate::schedule::AMPLITUDE && amplitude != -crate::schedule::AMPLITUDE {
             return Err(io::Error::new(

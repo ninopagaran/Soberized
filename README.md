@@ -53,6 +53,7 @@ Flatpak overrides. See the [security model](SECURITY.md) for boundaries and limi
 
 - [Installation, updates, and troubleshooting](docs/INSTALLATION.md)
 - [Gamescope setup and mouse capture](docs/GAMESCOPE.md)
+- [UI navigation diagnostic](docs/UI_NAVIGATION.md)
 - [Compatibility checks and validation results](docs/VALIDATION.md)
 - [Security design](SECURITY.md)
 

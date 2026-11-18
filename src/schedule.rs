@@ -9,6 +9,7 @@ pub const MAX_TICK_GAP_MS: u64 = 5_000;
 pub const AMPLITUDE: i32 = 16_384;
 pub const TEST_DELAY_MS: u64 = 10_000;
 pub const TEST_COOLDOWN_MS: u64 = 60_000;
+pub const UI_SELECT_MS: u64 = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PulseKind {
@@ -52,6 +53,7 @@ impl StopReason {
 pub enum Effect {
     None,
     Pulse(i32, PulseKind),
+    UiSelect,
     Neutral,
     Exit(StopReason),
 }
@@ -68,6 +70,9 @@ pub struct Schedule {
     stop_reason: Option<StopReason>,
     test_due: Option<u64>,
     last_test: Option<u64>,
+    select_due: Option<u64>,
+    select_end: Option<u64>,
+    selection_used: bool,
 }
 
 impl Schedule {
@@ -84,6 +89,9 @@ impl Schedule {
             stop_reason: None,
             test_due: None,
             last_test: None,
+            select_due: None,
+            select_end: None,
+            selection_used: false,
         }
     }
 
@@ -98,6 +106,9 @@ impl Schedule {
             }
             Command::Arm if self.owner.is_some() && self.owner != Some(client) => ReplyCode::Busy,
             Command::Arm if self.stop_reason.is_some() => ReplyCode::NotOwner,
+            Command::Arm if self.select_due.is_some() || self.select_end.is_some() => {
+                ReplyCode::Busy
+            }
             Command::Arm => {
                 if !self.armed {
                     self.owner = Some(client);
@@ -117,6 +128,19 @@ impl Schedule {
                 ReplyCode::Ok
             }
             Command::Status => ReplyCode::Ok,
+            Command::UiSelect
+                if self.owner != Some(client) || self.armed || self.stop_reason.is_some() =>
+            {
+                ReplyCode::NotOwner
+            }
+            Command::UiSelect if self.selection_used => ReplyCode::Busy,
+            Command::UiSelect => {
+                // A single selection-only probe per helper lifetime. No
+                // confirm, directions, keyboard input, or arbitrary buttons.
+                self.selection_used = true;
+                self.select_due = Some(now.saturating_add(TEST_DELAY_MS));
+                ReplyCode::Ok
+            }
             Command::TestInput if !self.armed || self.stop_reason.is_some() => ReplyCode::NotOwner,
             Command::TestInput
                 if self.pulse_end.is_some()
@@ -168,6 +192,16 @@ impl Schedule {
         if let Some(reason) = self.stop_reason {
             return Effect::Exit(reason);
         }
+        if let Some(end) = self.select_end {
+            if now >= end {
+                self.select_end = None;
+                return Effect::Neutral;
+            }
+        } else if self.select_due.is_some_and(|due| now >= due) {
+            self.select_due = None;
+            self.select_end = Some(now.saturating_add(UI_SELECT_MS));
+            return Effect::UiSelect;
+        }
         if let Some(end) = self.pulse_end {
             if now >= end {
                 self.pulse_end = None;
@@ -196,6 +230,8 @@ impl Schedule {
         Response {
             state: if self.owner.is_none() || self.stop_reason.is_some() {
                 State::Ready
+            } else if self.select_due.is_some() || self.select_end.is_some() {
+                State::Selecting
             } else if !self.armed {
                 State::Prepared
             } else if self.pulse_end.is_some() {
@@ -204,7 +240,11 @@ impl Schedule {
                 State::Armed
             },
             code,
-            next_seconds: if self.armed && self.stop_reason.is_none() {
+            next_seconds: if self.stop_reason.is_some() {
+                0
+            } else if let Some(due) = self.select_due {
+                due.saturating_sub(now).div_ceil(1_000) as u32
+            } else if self.armed {
                 self.test_due
                     .unwrap_or(self.next_pulse)
                     .saturating_sub(now)
@@ -225,6 +265,99 @@ impl Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_probe_is_owner_only_delayed_and_never_arms_movement() {
+        let mut s = Schedule::new(0);
+        assert_eq!(s.command(1, Command::UiSelect, 0).code, ReplyCode::NotOwner);
+        s.command(1, Command::Prepare, 0);
+        assert_eq!(s.command(2, Command::UiSelect, 0).code, ReplyCode::NotOwner);
+        let queued = s.command(1, Command::UiSelect, 0);
+        assert_eq!(queued.code, ReplyCode::Ok);
+        assert_eq!(queued.state, State::Selecting);
+        assert_eq!(queued.next_seconds, 10);
+        assert_eq!(s.command(1, Command::Arm, 0).code, ReplyCode::Busy);
+        assert_eq!(s.command(1, Command::UiSelect, 0).code, ReplyCode::Busy);
+        for now in (0..TEST_DELAY_MS).step_by(100) {
+            assert_eq!(s.tick(now), Effect::None);
+        }
+        assert_eq!(s.tick(TEST_DELAY_MS), Effect::UiSelect);
+        assert_eq!(s.tick(TEST_DELAY_MS + UI_SELECT_MS - 1), Effect::None);
+        assert_eq!(s.tick(TEST_DELAY_MS + UI_SELECT_MS), Effect::Neutral);
+        assert_eq!(
+            s.response(ReplyCode::Ok, TEST_DELAY_MS + UI_SELECT_MS)
+                .state,
+            State::Prepared
+        );
+        assert_eq!(
+            s.command(1, Command::UiSelect, TEST_DELAY_MS + UI_SELECT_MS)
+                .code,
+            ReplyCode::Busy
+        );
+        assert_eq!(s.pulse_count(), 0);
+        assert_eq!(
+            advance(&mut s, TEST_DELAY_MS + 250, INTERVAL_MS * 2),
+            Effect::None
+        );
+        assert_eq!(s.pulse_count(), 0);
+    }
+
+    #[test]
+    fn selection_probe_cannot_be_used_while_movement_is_armed() {
+        let mut s = Schedule::new(0);
+        s.command(1, Command::Arm, 0);
+        assert_eq!(s.command(1, Command::UiSelect, 0).code, ReplyCode::NotOwner);
+        assert_eq!(advance(&mut s, 0, TEST_DELAY_MS), Effect::None);
+        assert_eq!(s.response(ReplyCode::Ok, TEST_DELAY_MS).state, State::Armed);
+    }
+
+    #[test]
+    fn selection_never_renews_a_lease_and_is_cancelled_on_owner_loss() {
+        for mode in 0..5 {
+            let mut s = Schedule::new(0);
+            s.command(1, Command::Prepare, 0);
+            s.command(1, Command::UiSelect, 0);
+            let effect = match mode {
+                0 => {
+                    s.disconnect(1);
+                    s.tick(1)
+                }
+                1 => {
+                    s.command(2, Command::Stop, 1);
+                    s.tick(1)
+                }
+                2 => s.tick(MAX_TICK_GAP_MS + 1),
+                3 => {
+                    assert_eq!(s.tick(1), Effect::None);
+                    s.tick(0)
+                }
+                _ => {
+                    for now in (0..LEASE_MS).step_by(50) {
+                        s.tick(now);
+                    }
+                    s.tick(LEASE_MS)
+                }
+            };
+            assert_eq!(
+                effect,
+                Effect::Exit(
+                    [
+                        StopReason::OwnerDisconnected,
+                        StopReason::Requested,
+                        StopReason::SchedulingGap,
+                        StopReason::ClockRegression,
+                        StopReason::LeaseExpired,
+                    ][mode]
+                )
+            );
+            assert_eq!(s.pulse_count(), 0);
+            assert_eq!(
+                s.command(1, Command::UiSelect, LEASE_MS).code,
+                ReplyCode::NotOwner
+            );
+            assert!(matches!(s.tick(LEASE_MS), Effect::Exit(_)));
+        }
+    }
 
     fn advance(schedule: &mut Schedule, start: u64, end: u64) -> Effect {
         let mut effect = Effect::None;

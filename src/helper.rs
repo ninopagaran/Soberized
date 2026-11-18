@@ -101,6 +101,14 @@ fn apply_tick(schedule: &mut Schedule, output: &mut impl Output, now: u64) -> io
                 now
             );
         }
+        Effect::UiSelect => {
+            output.select_ui()?;
+            eprintln!(
+                "Soberized diagnostic=ui-select phase=press button=BTN_SELECT duration_ms={} boottime_ms={}",
+                crate::schedule::UI_SELECT_MS,
+                now
+            );
+        }
         Effect::Neutral => {
             output.neutral()?;
             eprintln!(
@@ -246,6 +254,11 @@ mod tests {
         assert!(separate_identity(61_184, 1_000));
     }
     impl Output for RecordingOutput {
+        fn select_ui(&mut self) -> io::Result<()> {
+            self.values.push(i32::MIN);
+            Ok(())
+        }
+
         fn pulse(&mut self, amplitude: i32) -> io::Result<()> {
             self.values.push(amplitude);
             Ok(())
@@ -269,6 +282,38 @@ mod tests {
         s.disconnect(1);
         assert!(!apply_tick(&mut s, &mut output, INTERVAL_MS + 1).unwrap());
         assert_eq!(output.values, [AMPLITUDE, 0]);
+    }
+
+    #[test]
+    fn selection_output_is_released_on_timeout_stop_and_owner_loss() {
+        use crate::schedule::{TEST_DELAY_MS, UI_SELECT_MS};
+        for mode in 0..3 {
+            let mut schedule = Schedule::new(0);
+            let mut output = RecordingOutput::default();
+            schedule.command(1, Command::Prepare, 0);
+            schedule.command(1, Command::UiSelect, 0);
+            for now in (0..TEST_DELAY_MS).step_by(50) {
+                assert!(apply_tick(&mut schedule, &mut output, now).unwrap());
+            }
+            assert!(output.values.is_empty());
+            assert!(apply_tick(&mut schedule, &mut output, TEST_DELAY_MS).unwrap());
+            assert_eq!(output.values, [i32::MIN]);
+            match mode {
+                0 => assert!(
+                    apply_tick(&mut schedule, &mut output, TEST_DELAY_MS + UI_SELECT_MS).unwrap()
+                ),
+                1 => {
+                    schedule.disconnect(1);
+                    assert!(!apply_tick(&mut schedule, &mut output, TEST_DELAY_MS + 1).unwrap());
+                }
+                _ => {
+                    schedule.command(2, Command::Stop, TEST_DELAY_MS + 1);
+                    assert!(!apply_tick(&mut schedule, &mut output, TEST_DELAY_MS + 1).unwrap());
+                }
+            }
+            assert_eq!(output.values, [i32::MIN, 0]);
+            assert_eq!(schedule.pulse_count(), 0);
+        }
     }
 
     #[test]
@@ -339,6 +384,10 @@ mod tests {
         let other = Client::connect_for_test(&path).unwrap();
         assert_eq!(other.command(Command::Arm).unwrap().code, ReplyCode::Busy);
         assert_eq!(
+            other.command(Command::UiSelect).unwrap().code,
+            ReplyCode::NotOwner
+        );
+        assert_eq!(
             other.command(Command::TestInput).unwrap().code,
             ReplyCode::NotOwner
         );
@@ -352,6 +401,10 @@ mod tests {
         let response = owner.command(Command::Arm).unwrap();
         assert_eq!(response.state, State::Armed);
         assert_eq!(response.next_seconds, 600);
+        assert_eq!(
+            owner.command(Command::UiSelect).unwrap().code,
+            ReplyCode::NotOwner
+        );
         assert_eq!(other.command(Command::Arm).unwrap().code, ReplyCode::Busy);
         assert_eq!(
             other.command(Command::Renew).unwrap().code,

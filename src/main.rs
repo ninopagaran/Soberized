@@ -22,7 +22,7 @@ fn run() -> io::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.is_empty() || arguments == ["--help"] || arguments == ["help"] {
         println!(
-            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch [--gamescope]      Prepare a gamepad, then launch Sober (optional nested display)\n    --capture-mouse        With --gamescope: opt into camera mouse capture\n  start                    Arm input for the current Sober instance\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n  test-input               Queue one brief movement pulse in 10 seconds\n\nPulses can move your avatar. Park in a safe location before starting.\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
+            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch [--gamescope]      Prepare a gamepad, then launch Sober (optional nested display)\n    --capture-mouse        With --gamescope: opt into camera mouse capture\n  start                    Arm input for the current Sober instance\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n  test-input               Queue one brief movement pulse in 10 seconds\n  test-ui-navigation       Test one gamepad Select press without confirming a button\n\nPulses can move your avatar. Park in a safe location before starting.\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
@@ -56,6 +56,7 @@ fn run() -> io::Result<()> {
         "toggle" => start(),
         "status" => status(),
         "test-input" => test_input(),
+        "test-ui-navigation" => test_ui_navigation(),
         "session" => session(), // Invoked by the root-owned systemd user unit.
         _ => Err(io::Error::other("unknown command; use soberized --help")),
     }
@@ -138,7 +139,16 @@ fn status() -> io::Result<()> {
     println!("Soberized {}", env!("CARGO_PKG_VERSION"));
     installed()?;
     let session = units::query(true, USER_UNIT)?;
-    if session.failed() {
+    let controller = unit_active(true, USER_UNIT);
+    let response = if unit_active(false, HELPER_UNIT) {
+        Some(Client::connect(Path::new(SOCKET_PATH))?.command(Operation::Status)?)
+    } else {
+        None
+    };
+    let diagnostic = !controller
+        && response
+            .is_some_and(|response| matches!(response.state, State::Prepared | State::Selecting));
+    if session.failed() && !diagnostic {
         if session.status.starts_with("Roblox disconnected:") {
             return Err(io::Error::other(session.status));
         }
@@ -147,8 +157,7 @@ fn status() -> io::Result<()> {
             session.result, session.status
         )));
     }
-    let controller = unit_active(true, USER_UNIT);
-    if !unit_active(false, HELPER_UNIT) {
+    let Some(response) = response else {
         println!(
             "{}",
             if controller {
@@ -162,13 +171,14 @@ fn status() -> io::Result<()> {
             }
         );
         return Ok(());
-    }
-    let response = Client::connect(Path::new(SOCKET_PATH))?.command(Operation::Status)?;
+    };
     match response.state {
         State::Ready => println!("Waiting for a session lease; no pulses scheduled."),
         State::Prepared => println!(
             "{}",
-            if session.status.starts_with("Waiting for ") {
+            if !controller {
+                "Neutral diagnostic controller present; movement is disabled."
+            } else if session.status.starts_with("Waiting for ") {
                 &session.status
             } else {
                 "Virtual controller prepared; movement disabled until a Roblox game join."
@@ -181,6 +191,10 @@ fn status() -> io::Result<()> {
         State::Pulsing => println!(
             "Sending a bounded controller pulse; {} pulses sent.",
             response.pulses
+        ),
+        State::Selecting => println!(
+            "UI selection diagnostic queued or active; Select starts in {}s. Movement is disabled.",
+            response.next_seconds
         ),
     }
     Ok(())
@@ -231,6 +245,75 @@ fn launch(mode: LaunchMode) -> io::Result<()> {
     result
 }
 
+fn test_ui_navigation() -> io::Result<()> {
+    installed()?;
+    if unit_active(true, USER_UNIT) {
+        return Err(io::Error::other(
+            "run soberized stop before the selection-only diagnostic; it never replaces an active input lease",
+        ));
+    }
+    let target = sober::instance()?.ok_or_else(|| {
+        io::Error::other("Sober is not running; use soberized launch first, then soberized stop")
+    })?;
+    let mut lease = SessionLease::prepare()?;
+    let mut accessible = false;
+    for _ in 0..50 {
+        lease.check()?;
+        if gamepad_accessible()? {
+            accessible = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if !accessible {
+        return Err(io::Error::other(
+            "the diagnostic controller has no readable event node; inspect udev seat ACLs",
+        ));
+    }
+    if lease.client.command(Operation::UiSelect)?.code != ReplyCode::Ok {
+        return Err(io::Error::other(
+            "could not queue the UI selection diagnostic",
+        ));
+    }
+    println!(
+        "In 10 seconds, the virtual gamepad will press Select once for 100 ms, then release all controls. Focus Gamescope and watch for a UI highlight. No direction, confirm, Enter, or mouse input is sent."
+    );
+    println!(
+        "The diagnostic keeps the neutral controller present for another 10 seconds, then removes it. Ctrl+C or soberized stop cancels the test."
+    );
+    let deadline = lease.check()?
+        + soberized::schedule::TEST_DELAY_MS
+        + soberized::schedule::UI_SELECT_MS
+        + 10_000;
+    let mut released = false;
+    loop {
+        let now = lease.check()?;
+        if sober::instance()?.as_ref() != Some(&target) {
+            return Err(io::Error::other(
+                "Sober instance ended or changed; diagnostic cancelled",
+            ));
+        }
+        let response = lease.client.command(Operation::Status)?;
+        match response.state {
+            State::Selecting => {}
+            State::Prepared => {
+                if !released {
+                    println!(
+                        "Select was sent and released. Check whether a button is highlighted."
+                    );
+                    released = true;
+                }
+            }
+            _ => return Err(io::Error::other("diagnostic lease changed; test stopped")),
+        }
+        if now >= deadline {
+            println!("Selection-only diagnostic finished; controller removed on exit.");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 fn wait_for_controller(prepared_only: bool) -> io::Result<()> {
     for _ in 0..50 {
         if !unit_active(true, USER_UNIT) {
@@ -248,6 +331,11 @@ fn wait_for_controller(prepared_only: bool) -> io::Result<()> {
                 ));
             }
             State::Ready => std::thread::sleep(Duration::from_millis(100)),
+            State::Selecting => {
+                return Err(io::Error::other(
+                    "a UI selection diagnostic is active; finish it before starting movement",
+                ));
+            }
         }
     }
     Err(io::Error::other(

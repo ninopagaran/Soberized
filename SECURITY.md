@@ -69,10 +69,12 @@ commands, truncated/oversized packets, and unexpected fields close the client.
 `MSG_TRUNC` detects a valid-looking prefix with extra data. `recvmsg/sendmsg` are
 not allowed; no descriptor exchange is part of the protocol.
 
-Only Prepare, Arm, Renew, Stop, Status, and a fixed TestInput diagnostic exist.
-Protocol version 3 rejects helpers without neutral preparation. Prepare acquires
-the same single-owner, 30-second lease as Arm but permits no scheduled or test
-pulses. Only that owner can arm the prepared controller; another Prepare cannot
+Only Prepare, Arm, Renew, Stop, Status, and fixed TestInput/UiSelect diagnostics
+exist. Protocol version 4 rejects helpers without the selection-only diagnostic.
+Prepare acquires the same single-owner, 30-second lease as Arm but permits no
+scheduled or diagnostic movement pulses. Its owner may request one selection-only
+diagnostic as described below.
+Only that owner can arm the prepared controller; another Prepare cannot
 replace it or postpone an armed pulse. A single connection owns the lease;
 another client cannot renew or replace it. Authorized clients may stop it. The
 helper permits at most eight clients, bounded acceptance work, a five-second
@@ -88,6 +90,17 @@ events, axes, amplitudes, durations, or arbitrary timing. A queued diagnostic
 replaces the next scheduled pulse so the two do not collide. A local attacker
 with the desktop UID can stop/restart the helper, resetting its diagnostic
 cooldown; no cross-restart rate-limit guarantee is made.
+
+The selection-only diagnostic requires a prepared, unarmed owner and is accepted
+once per helper lifetime. After ten seconds it presses only the existing gamepad
+Select button for 100 ms, then releases all controls. Arming is rejected while it
+is queued or active. It does not renew the lease, count as a movement pulse, or
+send directions/confirmation. The CLI refuses to replace an active session lease
+and keeps the neutral device present for ten seconds after release. Stop, owner
+loss, expiry, and scheduling-gap checks cancel queued or active selection input.
+No keyboard/mouse capabilities, additional syscalls, or raw input commands are
+added. Other applications can also react to the fixed gamepad Select press.
+
 The normal 50 ms event-loop polling can add scheduling latency; this is not a
 hard real-time system. An exploited helper could write arbitrary events within
 its fixed gamepad capabilities; fixed application timing is not a security

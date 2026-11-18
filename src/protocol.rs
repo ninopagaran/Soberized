@@ -3,7 +3,7 @@ use std::io;
 
 pub const REQUEST_LEN: usize = 8;
 pub const RESPONSE_LEN: usize = 16;
-const MAGIC: [u8; 4] = [b'S', b'B', b'Z', 3];
+const MAGIC: [u8; 4] = [b'S', b'B', b'Z', 4];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -14,6 +14,7 @@ pub enum Command {
     Status = 4,
     TestInput = 5,
     Prepare = 6,
+    UiSelect = 7,
 }
 
 impl Command {
@@ -35,6 +36,7 @@ impl Command {
             4 => Ok(Self::Status),
             5 => Ok(Self::TestInput),
             6 => Ok(Self::Prepare),
+            7 => Ok(Self::UiSelect),
             _ => Err(invalid()),
         }
     }
@@ -47,6 +49,7 @@ pub enum State {
     Armed = 1,
     Pulsing = 2,
     Prepared = 3,
+    Selecting = 4,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +88,7 @@ impl Response {
             1 => State::Armed,
             2 => State::Pulsing,
             3 => State::Prepared,
+            4 => State::Selecting,
             _ => return Err(invalid()),
         };
         let code = match bytes[5] {
@@ -122,6 +126,7 @@ mod tests {
             Command::Status,
             Command::TestInput,
             Command::Prepare,
+            Command::UiSelect,
         ] {
             assert_eq!(Command::decode(&command.encode()).unwrap(), command);
         }
@@ -144,6 +149,11 @@ mod tests {
             pulses: u32::MAX,
         };
         assert_eq!(Response::decode(&response.encode()).unwrap(), response);
+        let selecting = Response {
+            state: State::Selecting,
+            ..response
+        };
+        assert_eq!(Response::decode(&selecting.encode()).unwrap(), selecting);
         for index in 0..8 {
             let mut bytes = response.encode();
             bytes[index] = 255;
@@ -152,8 +162,8 @@ mod tests {
     }
 
     #[test]
-    fn helpers_without_neutral_preparation_are_not_accepted() {
-        for version in [1, 2] {
+    fn helpers_without_selection_diagnostics_are_not_accepted() {
+        for version in [1, 2, 3] {
             let mut request = Command::Prepare.encode();
             request[3] = version;
             assert!(Command::decode(&request).is_err());
