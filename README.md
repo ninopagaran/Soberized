@@ -26,6 +26,11 @@ Sober/Roblox's input handling still needs a focused diagnostic and unattended
 trial. The client log monitor stops input on an observed disconnect, including
 idle error 278. Soberized does not reconnect automatically.
 
+The repeated visible-but-unfocused diagnostic also produced no movement with a
+terminal focused. Version 0.4 adds an optional **Gamescope nested Wayland launch**
+to test focus handling independently of Sway's active window. This mode has not
+yet passed the real-game background/idle checks. See [Gamescope mode](docs/GAMESCOPE.md).
+
 ## Security design
 
 ```text
@@ -65,7 +70,8 @@ See [SECURITY.md](SECURITY.md) for the threat model and review details.
 ## Build and check
 
 Requirements: Linux x86-64, Rust stable (1.85+), `libevdev`, `libseccomp`, Flatpak
-1.15.6+, and systemd 253+. The initial target is Arch Linux/Sway.
+1.15.6+, and systemd 253+. Gamescope is optional for the nested launch mode. The
+initial target is Arch Linux/Sway.
 
 ```sh
 sudo pacman -S --needed rustup libevdev libseccomp
@@ -136,6 +142,22 @@ it is narrower than `--device=all`, but is **not** a per-controller permission.
 With Sober already launched with appropriate access, use `soberized start`.
 Starting cannot retrofit device permissions into an existing Flatpak sandbox.
 
+For the experimental focus workaround, install Gamescope from Arch's repository,
+close Sober, and use:
+
+```sh
+sudo pacman -S --needed gamescope
+soberized launch --gamescope
+```
+
+This starts a 1280×720 nested display at 30 FPS. Sober uses its native Wayland
+socket, with X11 access disabled for that launch and Gamescope's optional Vulkan
+layer disabled. The compositor manages the client's internal focus; Soberized
+does not switch your Sway workspace or focus. You can move the outer Gamescope
+window to another workspace after validating background movement. Missing
+Gamescope or a missing Wayland desktop is reported before starting a controller.
+The dependency is installed separately; Soberized's installer does not fetch it.
+
 On launch, the user worker first acquires a neutral-only lease. Once the helper
 confirms preparation and udev grants normal access to the matching event node,
 Sober launches with the controller already present. The worker renews its lease
@@ -173,17 +195,19 @@ cargo build --release --locked --offline
 sudo ./scripts/install.sh --user nino
 systemctl --user daemon-reload
 soberized --version
-soberized launch
+soberized launch --gamescope
 ```
 
-The 0.3 protocol rejects helpers without neutral preparation. An incompatible
+Protocol version 3 rejects helpers without neutral preparation. An incompatible
 helper error means the installed CLI/helper or the still-running old session must
 be updated together. `start` attaches to an existing instance and cannot repeat
 the controller-before-Sober startup sequence; use `launch` for this diagnostic.
-Verify that the installed command reports `soberized 0.3.0` before testing this
+Verify that the installed command reports `soberized 0.4.0` before testing this
 release. Building in `target/release` does not update `/usr/bin/soberized` or the
 root-owned helper. Status, doctor, and new runtime journal records include their
 build version to make this distinction visible.
+The 0.4 release uses protocol version 3 and includes the neutral preparation
+stage. The installed 0.2 CLI/helper must both be replaced before trying it.
 
 ## Sway shortcut and stopping
 

@@ -25,6 +25,13 @@ the repo's 0.3.0 release artifact had not been installed. This trial cannot
 validate or invalidate the new launch order, and the focused success cannot be
 attributed to that change. The launcher already had the SDL background hint set.
 
+The user repeated the visible-but-unfocused movement test and again reported no
+movement with the terminal focused. Version 0.4 adds `launch --gamescope` as an
+experimental focus workaround; [its real-game validation](GAMESCOPE.md) is
+pending. Focused movement, background movement, and idle prevention remain
+separate gates. Neither the new mode nor a shorter pulse interval is proven to
+resolve the idle failure.
+
 ## 1. Before creating a controller
 
 Run as the desktop user:

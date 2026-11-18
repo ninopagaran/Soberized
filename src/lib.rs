@@ -4,6 +4,7 @@ compile_error!("Soberized v1 supports Linux x86-64 only");
 pub mod device;
 pub mod helper;
 pub mod ipc;
+pub mod launch;
 pub mod notify;
 pub mod protocol;
 pub mod roblox_log;

@@ -119,6 +119,29 @@ disconnect details using systemd StatusText, with notification field injection
 rejected. No account IDs, server addresses, tickets, or full game log lines are
 copied to the journal or status.
 
+## Optional nested compositor
+
+`launch --gamescope` executes the fixed `/usr/bin/gamescope` profile as the
+desktop user, outside the restricted helper. It is an additional trusted host
+component and must be kept updated. Its nested desktop provides focus handling;
+it is not an additional security sandbox for Sober. Only Sober is launched in it.
+
+Gamescope uses the Wayland backend and exposes its native Wayland socket to its
+Flatpak child. The child enables that socket, disables X11/fallback-X11 sockets,
+clears `DISPLAY`, and selects SDL's Wayland driver. Gamescope's own environment
+sets `WAYLAND_DISPLAY` to the nested socket before executing Flatpak. The
+optional Gamescope Vulkan WSI layer is explicitly disabled. No host display
+focus commands, keyboard/cursor grab options, real-time capabilities, DRM
+backend, file-sharing grants, broad device access, or persistent overrides are
+requested. Launch arguments and application ID are fixed; arbitrary command or
+flag passthrough is rejected. Dependency/desktop checks precede lease creation.
+
+The original helper's identity, syscall filter, device capabilities, protocol,
+timing, and lease rules are unchanged. The virtual controller remains visible
+to other applications with normal device access; a nested compositor does not
+turn it into Sober-only input. Background acceptance and idle-timer reset must
+still be measured independently. See [Gamescope validation](docs/GAMESCOPE.md).
+
 ## Review and release checks
 
 - Run `scripts/check.sh` and `scripts/check-host.sh` as an unprivileged user.
@@ -141,3 +164,6 @@ copied to the journal or status.
 - [Flatpak input permissions](https://docs.flatpak.org/en/latest/sandbox-permissions.html)
 - [Sober gamepad setting](https://vinegarhq.org/Sober/Configuration/index.html)
 - [SDL background joystick events](https://wiki.libsdl.org/SDL3/SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS)
+- [Gamescope focus behavior](https://github.com/ValveSoftware/gamescope/issues/636#issuecomment-1264253700)
+- [Gamescope native Wayland focus handling](https://github.com/ValveSoftware/gamescope/blob/master/src/wlserver.cpp)
+- [Gamescope optional layer activation](https://github.com/ValveSoftware/gamescope/blob/master/layer/VkLayer_FROG_gamescope_wsi.json.in)

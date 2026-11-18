@@ -1,4 +1,5 @@
 use soberized::ipc::Client;
+use soberized::launch::{self as launch_config, Mode as LaunchMode};
 use soberized::protocol::{Command as Operation, ReplyCode, State};
 use soberized::units::{self, SOCKET_UNIT};
 use soberized::{
@@ -21,7 +22,7 @@ fn run() -> io::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.is_empty() || arguments == ["--help"] || arguments == ["help"] {
         println!(
-            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch                   Prepare a neutral gamepad, then launch Sober\n  start                    Arm input for the current Sober instance\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n  test-input               Queue one brief movement pulse in 10 seconds\n\nPulses can move your avatar. Park in a safe location before starting.\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
+            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch [--gamescope]      Prepare a gamepad, then launch Sober (optional nested display)\n  start                    Arm input for the current Sober instance\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n  test-input               Queue one brief movement pulse in 10 seconds\n\nPulses can move your avatar. Park in a safe location before starting.\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
@@ -39,11 +40,16 @@ fn run() -> io::Result<()> {
     if arguments == ["doctor"] || arguments == ["doctor", "--sandbox-test"] {
         return doctor(arguments.len() == 2);
     }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "launch")
+    {
+        return launch(LaunchMode::parse(&arguments[1..])?);
+    }
     if arguments.len() != 1 {
         return Err(io::Error::other("unknown arguments; use soberized --help"));
     }
     match arguments[0].as_str() {
-        "launch" => launch(),
         "start" => start(),
         "stop" => stop(),
         "toggle" if unit_active(true, USER_UNIT) => stop(),
@@ -206,7 +212,9 @@ fn test_input() -> io::Result<()> {
     Ok(())
 }
 
-fn launch() -> io::Result<()> {
+fn launch(mode: LaunchMode) -> io::Result<()> {
+    // Check optional dependencies before activating or replacing any lease.
+    mode.check_requirements()?;
     installed()?;
     if sober::instance()?.is_some() {
         return Err(io::Error::other(
@@ -216,7 +224,7 @@ fn launch() -> io::Result<()> {
     // The worker owns a neutral-only lease before Flatpak starts and
     // Sober initializes its controller handling. It arms only after a game join.
     control_service("restart")?;
-    let result = launch_prepared();
+    let result = launch_prepared(mode);
     if result.is_err() {
         let _ = control_service("stop");
     }
@@ -247,7 +255,7 @@ fn wait_for_controller(prepared_only: bool) -> io::Result<()> {
     ))
 }
 
-fn launch_prepared() -> io::Result<()> {
+fn launch_prepared(mode: LaunchMode) -> io::Result<()> {
     wait_for_controller(true)?;
     // uinput creation and udev's node/seat ACL setup are asynchronous. Do not
     // launch a client until the desktop user can read the matching event node.
@@ -269,34 +277,42 @@ fn launch_prepared() -> io::Result<()> {
             "Sober started during controller preparation; close it and retry soberized launch",
         ));
     }
-    let mut child = Command::new("/usr/bin/flatpak")
-        .args([
-            "run",
-            "--device=input",
-            "--env=SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1",
-            APP_ID,
-        ])
+    let mut child = mode
+        .command()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()?;
-    for _ in 0..30 {
-        if let Some(exit) = child.try_wait()? {
-            return Err(io::Error::other(format!(
-                "Sober exited during launch ({exit})"
-            )));
+    let result = (|| {
+        for _ in 0..30 {
+            if let Some(exit) = child.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "Sober launcher exited during startup ({exit})"
+                )));
+            }
+            if sober::instance()?.is_some() {
+                println!(
+                    "Sober launched with the virtual controller already present. Movement stays disabled until a Roblox game join; check soberized status."
+                );
+                if mode == LaunchMode::Gamescope {
+                    println!(
+                        "Using Gamescope's nested Wayland display. Background input and idle prevention require validation."
+                    );
+                }
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(500));
         }
-        if sober::instance()?.is_some() {
-            println!(
-                "Sober launched with the virtual controller already present. Movement stays disabled until a Roblox game join; check soberized status."
-            );
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(500));
+        Err(io::Error::other(
+            "Sober startup timed out; the controller was stopped. Close Sober and retry soberized launch",
+        ))
+    })();
+    if result.is_err() && mode == LaunchMode::Gamescope {
+        // A failed compositor launch should not leave its empty window running.
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    Err(io::Error::other(
-        "Sober startup timed out; the controller was stopped. Close Sober and retry soberized launch",
-    ))
+    result
 }
 
 fn gamepad_accessible() -> io::Result<bool> {
@@ -476,6 +492,14 @@ fn session() -> io::Result<()> {
 
 fn doctor(sandbox_test: bool) -> io::Result<()> {
     println!("Soberized CLI: {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "Gamescope (optional nested display): {}",
+        if launch_config::gamescope_installed() {
+            "installed"
+        } else {
+            "not installed"
+        }
+    );
     let mut ready = true;
     let output = Command::new("/usr/bin/flatpak")
         .args(["info", APP_ID])
