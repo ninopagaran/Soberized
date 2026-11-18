@@ -22,7 +22,7 @@ fn run() -> io::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.is_empty() || arguments == ["--help"] || arguments == ["help"] {
         println!(
-            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch [--gamescope]      Prepare a gamepad, then launch Sober (optional nested display)\n  start                    Arm input for the current Sober instance\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n  test-input               Queue one brief movement pulse in 10 seconds\n\nPulses can move your avatar. Park in a safe location before starting.\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
+            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch [--gamescope]      Prepare a gamepad, then launch Sober (optional nested display)\n    --capture-mouse        With --gamescope: opt into camera mouse capture\n  start                    Arm input for the current Sober instance\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n  test-input               Queue one brief movement pulse in 10 seconds\n\nPulses can move your avatar. Park in a safe location before starting.\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
@@ -294,9 +294,14 @@ fn launch_prepared(mode: LaunchMode) -> io::Result<()> {
                 println!(
                     "Sober launched with the virtual controller already present. Movement stays disabled until a Roblox game join; check soberized status."
                 );
-                if mode == LaunchMode::Gamescope {
+                if mode.uses_gamescope() {
                     println!(
                         "Using Gamescope's nested Wayland display. Background input and idle prevention require validation."
+                    );
+                }
+                if mode.captures_mouse() {
+                    println!(
+                        "Mouse capture enabled for Gamescope. Use your Sway workspace shortcut to leave the window; check pointer release before resuming background use."
                     );
                 }
                 return Ok(());
@@ -307,7 +312,7 @@ fn launch_prepared(mode: LaunchMode) -> io::Result<()> {
             "Sober startup timed out; the controller was stopped. Close Sober and retry soberized launch",
         ))
     })();
-    if result.is_err() && mode == LaunchMode::Gamescope {
+    if result.is_err() && mode.uses_gamescope() {
         // A failed compositor launch should not leave its empty window running.
         let _ = child.kill();
         let _ = child.wait();

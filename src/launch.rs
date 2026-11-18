@@ -12,6 +12,7 @@ pub const GAMESCOPE_PATH: &str = "/usr/bin/gamescope";
 pub enum Mode {
     Native,
     Gamescope,
+    GamescopeMouseCapture,
 }
 
 impl Mode {
@@ -19,14 +20,28 @@ impl Mode {
         match options {
             [] => Ok(Self::Native),
             [option] if option == "--gamescope" => Ok(Self::Gamescope),
+            [first, second]
+                if (first == "--gamescope" && second == "--capture-mouse")
+                    || (first == "--capture-mouse" && second == "--gamescope") =>
+            {
+                Ok(Self::GamescopeMouseCapture)
+            }
             _ => Err(io::Error::other(
-                "usage: soberized launch [--gamescope]; extra launch arguments are not supported",
+                "usage: soberized launch [--gamescope [--capture-mouse]]; extra launch arguments are not supported",
             )),
         }
     }
 
+    pub fn uses_gamescope(self) -> bool {
+        self != Self::Native
+    }
+
+    pub fn captures_mouse(self) -> bool {
+        self == Self::GamescopeMouseCapture
+    }
+
     pub fn check_requirements(self) -> io::Result<()> {
-        if self == Self::Gamescope {
+        if self.uses_gamescope() {
             check_gamescope(
                 Path::new(GAMESCOPE_PATH),
                 std::env::var_os("WAYLAND_DISPLAY").as_deref(),
@@ -40,7 +55,7 @@ impl Mode {
     }
 
     fn command_with_paths(self, gamescope: &Path, flatpak: &Path) -> Command {
-        let mut command = if self == Self::Gamescope {
+        let mut command = if self.uses_gamescope() {
             let mut command = Command::new(gamescope);
             command.args([
                 "--backend",
@@ -54,11 +69,15 @@ impl Mode {
                 "30",
                 "-o",
                 "30",
-                "--",
             ]);
-            command.arg(flatpak);
+            if self.captures_mouse() {
+                // Explicit foreground camera compatibility mode. Wayland's
+                // compositor controls activation/release of this pointer lock.
+                command.arg("--force-grab-cursor");
+            }
+            command.arg("--").arg(flatpak);
             // Keep the compositor outside the terminal's foreground job group.
-            // Do not request keyboard/cursor grabs, DRM control, or capabilities.
+            // Never request a keyboard grab, DRM control, or capabilities.
             command.process_group(0);
             command
         } else {
@@ -69,7 +88,7 @@ impl Mode {
             "--device=input",
             "--env=SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1",
         ]);
-        if self == Self::Gamescope {
+        if self.uses_gamescope() {
             // With --expose-wayland Gamescope sets WAYLAND_DISPLAY to its own
             // socket before executing Flatpak. Keep Sober on that native path.
             command.args([
@@ -123,12 +142,24 @@ mod tests {
             Mode::parse(&["--gamescope".into()]).unwrap(),
             Mode::Gamescope
         );
+        for options in [
+            ["--gamescope", "--capture-mouse"],
+            ["--capture-mouse", "--gamescope"],
+        ] {
+            assert_eq!(
+                Mode::parse(&options.map(String::from)).unwrap(),
+                Mode::GamescopeMouseCapture
+            );
+        }
         for arguments in [
             vec!["--gamescope", "--device=all"],
             vec!["--gamescope", "--", "/bin/sh"],
             vec!["--gamescope", "--grab"],
             vec!["--gamescope=anything"],
             vec!["--command=/bin/sh"],
+            vec!["--capture-mouse"],
+            vec!["--gamescope", "--capture-mouse", "--capture-mouse"],
+            vec!["--gamescope", "--force-grab-cursor"],
         ] {
             let arguments = arguments.into_iter().map(String::from).collect::<Vec<_>>();
             assert!(Mode::parse(&arguments).is_err());
@@ -161,20 +192,21 @@ mod tests {
         let flatpak = directory.join("flatpak");
         std::fs::write(
             &gamescope,
-            "#!/bin/sh\nset -eu\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nDISPLAY=:99\nWAYLAND_DISPLAY=gamescope-test\nexport DISPLAY WAYLAND_DISPLAY\nexec \"$@\"\n",
+            "#!/bin/sh\nset -eu\nSBZ_TEST_MOUSE_CAPTURE=no\nwhile [ \"$1\" != -- ]; do\n case \"$1\" in\n  --force-grab-cursor) SBZ_TEST_MOUSE_CAPTURE=yes ;;\n  --grab|-g) exit 91 ;;\n esac\n shift\ndone\nshift\nDISPLAY=:99\nWAYLAND_DISPLAY=gamescope-test\nexport DISPLAY WAYLAND_DISPLAY SBZ_TEST_MOUSE_CAPTURE\nexec \"$@\"\n",
         ).unwrap();
         std::fs::write(
             &flatpak,
-            "#!/bin/sh\nprintf 'display=%s\\nwayland=%s\\n' \"$DISPLAY\" \"${WAYLAND_DISPLAY-unset}\"\nprintf '%s\\n' \"$@\"\n",
+            "#!/bin/sh\nprintf 'display=%s\\nwayland=%s\\ncapture=%s\\n' \"$DISPLAY\" \"${WAYLAND_DISPLAY-unset}\" \"${SBZ_TEST_MOUSE_CAPTURE-unset}\"\nprintf '%s\\n' \"$@\"\n",
         ).unwrap();
         for path in [&gamescope, &flatpak] {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        for mode in [Mode::Native, Mode::Gamescope] {
+        for mode in [Mode::Native, Mode::Gamescope, Mode::GamescopeMouseCapture] {
             let output = mode
                 .command_with_paths(&gamescope, &flatpak)
                 .env("DISPLAY", ":0")
                 .env("WAYLAND_DISPLAY", "wayland-parent")
+                .env_remove("SBZ_TEST_MOUSE_CAPTURE")
                 .output()
                 .unwrap();
             assert!(
@@ -188,16 +220,27 @@ mod tests {
             assert!(lines.contains(&"--device=input"));
             assert!(!lines.contains(&"--device=all"));
             assert!(!lines.iter().any(|line| line.starts_with("--filesystem=")));
-            if mode == Mode::Gamescope {
+            // Capture is consumed by the compositor, never passed to Flatpak.
+            assert!(!lines.contains(&"--force-grab-cursor"));
+            if mode.uses_gamescope() {
                 assert_eq!(&lines[..2], &["display=:99", "wayland=gamescope-test"]);
                 assert!(lines.contains(&"--socket=wayland"));
                 assert!(lines.contains(&"--nosocket=x11"));
                 assert!(lines.contains(&"--unset-env=DISPLAY"));
                 assert!(!lines.contains(&"--socket=x11"));
                 assert!(lines.contains(&"--env=DISABLE_GAMESCOPE_WSI=1"));
+                assert_eq!(
+                    lines[2],
+                    if mode.captures_mouse() {
+                        "capture=yes"
+                    } else {
+                        "capture=no"
+                    }
+                );
             } else {
                 assert_eq!(&lines[..2], &["display=:0", "wayland=wayland-parent"]);
                 assert!(!lines.iter().any(|line| line.starts_with("--socket=")));
+                assert_eq!(lines[2], "capture=unset");
             }
         }
     }

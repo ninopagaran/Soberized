@@ -131,10 +131,19 @@ Flatpak child. The child enables that socket, disables X11/fallback-X11 sockets,
 clears `DISPLAY`, and selects SDL's Wayland driver. Gamescope's own environment
 sets `WAYLAND_DISPLAY` to the nested socket before executing Flatpak. The
 optional Gamescope Vulkan WSI layer is explicitly disabled. No host display
-focus commands, keyboard/cursor grab options, real-time capabilities, DRM
+focus commands, keyboard grab options, real-time capabilities, DRM
 backend, file-sharing grants, broad device access, or persistent overrides are
 requested. Launch arguments and application ID are fixed; arbitrary command or
 flag passthrough is rejected. Dependency/desktop checks precede lease creation.
+
+`--capture-mouse` is accepted only with `--gamescope` and explicitly requests
+Gamescope's `--force-grab-cursor` relative-mouse mode. The standard profile does
+not request this capture. This is a compositor pointer lock, controlled by the
+host Wayland compositor, not an added uinput mouse capability. It can confine the
+pointer while using the Gamescope window. The host's workspace shortcuts remain
+available because keyboard grabbing is not requested. Actual pointer release
+on workspace/focus change must be validated; do not claim background mouse
+non-interference for the capture profile until that check passes.
 
 The original helper's identity, syscall filter, device capabilities, protocol,
 timing, and lease rules are unchanged. The virtual controller remains visible

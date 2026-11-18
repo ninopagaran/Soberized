@@ -38,7 +38,7 @@ soberized doctor --sandbox-test
 soberized launch --gamescope
 ```
 
-The installed version for the latest build must be `soberized 0.4.1`. Both root-owned binaries must
+The installed version for the latest build must be `soberized 0.4.2`. Both root-owned binaries must
 be updated; a successful build alone does not update installed code. Enable
 gamepad support in Sober Settings before launching.
 The Vulkan summary must succeed and list the intended GPU before proceeding.
@@ -47,8 +47,9 @@ The virtual controller is prepared first and stays neutral until a game join.
 Gamescope creates a 1280×720 display with a 30 FPS limit both while focused and
 unfocused. Sober uses Gamescope's native Wayland socket, with X11/fallback-X11
 access disabled, `DISPLAY` unset, and SDL's Wayland backend selected for that
-launch. The optional Gamescope Vulkan WSI layer is disabled. No cursor/keyboard
-grab or real-time privilege is requested.
+launch. The optional Gamescope Vulkan WSI layer is disabled. The standard profile
+requests no cursor/keyboard grab or real-time privilege. The explicit mouse
+capture profile below adds only Gamescope's cursor capture.
 
 Sway sees the outer Gamescope window. Move that window using your normal Sway
 bindings; a rule matching Sober's app ID might not match it. `soberized stop`
@@ -117,8 +118,35 @@ before replacing it with the actual positive PID. A retry of 0.4.0 succeeded.
 Version 0.4.1 waits through that pending state only in the bounded startup loops.
 It never binds a lease target to PID zero. Duplicate-instance checks still
 recognize the pending app, malformed metadata still fails, and active-session
-monitoring remains strict. The current 0.4.0 session can keep running; install
-0.4.1 when updating for subsequent launches.
+monitoring remains strict. The startup fix is also included in 0.4.2 and later
+builds.
+
+## Camera mouse capture
+
+The tested standard profile later showed a camera issue: menu clicks and keyboard
+movement worked, but right-button dragging locked the cursor without rotating
+the camera. Relaunching the standard profile did not resolve it. This is
+consistent with a relative-pointer/lock forwarding problem, without identifying
+the exact component responsible.
+
+Version 0.4.2 adds an opt-in profile for testing Gamescope's explicit relative
+mouse mode:
+
+```sh
+soberized launch --gamescope --capture-mouse
+```
+
+The flag must be supplied when launching, after closing the current Sober
+window. It maps to Gamescope's `--force-grab-cursor` and is not enabled by
+default. It may keep the pointer confined even when navigating menus. No
+keyboard grab is requested; use your normal Sway workspace shortcut to leave
+the window. `Super+G` toggles Gamescope's keyboard grab, not this mouse option.
+
+Before using this profile for AFK sessions, test right-drag/first-person camera
+movement, menu interaction after releasing the right button, and ordinary
+desktop mouse/typing after switching workspaces. Treat a failed release as a
+failed compatibility test. The earlier 30-minute success used the standard
+profile and does not independently validate the capture profile.
 
 ## Vulkan startup failure
 

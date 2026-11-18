@@ -38,6 +38,13 @@ machine; overnight behavior and other experiences remain untested. Version
 0.4.1 also waits through Flatpak's temporary zero-PID startup state instead of
 aborting the launch. See [Gamescope mode](docs/GAMESCOPE.md).
 
+If menu clicks work but right-dragging locks the cursor without rotating the
+camera, version 0.4.2 offers an explicit camera-capture profile:
+`soberized launch --gamescope --capture-mouse`. It can keep the pointer captured
+inside Gamescope. Use your Sway workspace shortcut to leave, and validate pointer
+release before relying on this mode. Capture is off by default; its mouse and
+background behavior must be validated separately from the earlier 30-minute run.
+
 ## Security design
 
 ```text
@@ -211,7 +218,7 @@ Protocol version 3 rejects helpers without neutral preparation. An incompatible
 helper error means the installed CLI/helper or the still-running old session must
 be updated together. `start` attaches to an existing instance and cannot repeat
 the controller-before-Sober startup sequence; use `launch` for this diagnostic.
-Verify that the installed command reports `soberized 0.4.1` before testing this
+Verify that the installed command reports `soberized 0.4.2` before testing this
 release. Building in `target/release` does not update `/usr/bin/soberized` or the
 root-owned helper. Status, doctor, and new runtime journal records include their
 build version to make this distinction visible.
