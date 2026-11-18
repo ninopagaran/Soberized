@@ -286,23 +286,37 @@ impl Pointer {
         Err(io::Error::other("too many Gamescope input events"))
     }
 
-    pub fn click(&mut self, x: u32, y: u32) -> io::Result<()> {
+    // A software cursor can be part of Sober's game image and obscure OCR.
+    // Move only inside the bound compositor, without pressing any button.
+    pub fn park(&mut self) -> io::Result<()> {
+        self.move_to(1, 1)
+    }
+
+    fn move_to(&mut self, x: u32, y: u32) -> io::Result<()> {
         self.dispatch()?;
         if !self.ready || x >= 4096 || y >= 2160 {
-            return Err(io::Error::other("invalid reconnect click target"));
+            return Err(io::Error::other("invalid Gamescope pointer target"));
         }
         let device = self.device.unwrap().as_ptr();
         // SAFETY: sender device is resumed and has the required capabilities.
-        // The only button code permitted by this implementation is BTN_LEFT.
         unsafe {
-            ei_device_start_emulating(device, 1);
+            if !self.emulating {
+                ei_device_start_emulating(device, 1);
+            }
             ei_device_pointer_motion_absolute(device, f64::from(x), f64::from(y));
             ei_device_frame(device, ei_now(self.context.as_ptr()));
         }
         self.emulating = true;
         self.dispatch()?;
         std::thread::sleep(Duration::from_millis(50));
+        self.dispatch()
+    }
+
+    pub fn click(&mut self, x: u32, y: u32) -> io::Result<()> {
+        self.move_to(x, y)?;
+        let device = self.device.unwrap().as_ptr();
         self.pressed = true;
+        // SAFETY: move_to checked the resumed sender. Only BTN_LEFT is sent.
         unsafe {
             ei_device_button_button(device, 0x110, true);
             ei_device_frame(device, ei_now(self.context.as_ptr()));

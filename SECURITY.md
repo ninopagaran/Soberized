@@ -179,8 +179,9 @@ still be measured independently. See [Gamescope validation](docs/GAMESCOPE.md).
 ## Optional automatic reconnect
 
 The user-session frontend can opt into recognizing a disconnect dialog and
-clicking its Reconnect label. Its libei code is compiled into the frontend only;
-the helper acquires no pointer capabilities, extra FFI library, or new syscalls.
+clicking its Reconnect label. Its libei and Leptonica code is compiled into the
+frontend only; the helper acquires no pointer capabilities, extra FFI library,
+or new syscalls.
 The user worker retains its AF_UNIX-only address-family restriction.
 
 The frontend walks the bound Flatpak wrapper's process ancestry and accepts only
@@ -192,6 +193,8 @@ process already running under the desktop UID remains outside this protection:
 it can access that user's compositor sockets and files independently.
 
 Only codes 266, 277, and 278 are eligible. The helper is paused before inspection.
+The frontend parks only the bound Gamescope pointer at the top-left corner,
+without a button press, to remove a drawn cursor from the dialog before OCR.
 Two private captures must identify the same unique English Reconnect label,
 beside Leave and below Disconnected, with the matching error code. OCR confidence,
 bounds, output size, subprocess timeouts, and image dimensions are checked. The
@@ -203,10 +206,15 @@ The retries are limited to ten, with delays of 15 seconds, 30 seconds, and then
 timeouts consume an attempt without clicking; movement remains paused. Client,
 lease, log, and socket identity errors still stop recovery immediately.
 
-Recognition can combine global and adaptive Otsu readings of the same image,
-within one 1.8-second OCR budget. The confidence threshold is unchanged. Only
-agreeing label locations are coalesced across passes; multiple labels within a
-pass, conflicting locations, and conflicting error codes are rejected.
+Recognition first checks the whole image. A fallback crop requires a unique
+Disconnected heading and Leave label with the matching error code between them.
+Leptonica clips only the expected right-hand button row and scales it by at
+most three before a single-line OCR pass. Exactly one high-confidence Reconnect
+word must be read, without extra words or clipping at the crop edges; its bounds
+map back to the original game surface. The crop cannot bypass conflicting full
+image labels or error codes. Both OCR passes share one 1.8-second budget; the
+confidence threshold is unchanged. Image decoding adds a native frontend
+dependency, already used by Tesseract, outside the restricted helper.
 
 These are heuristic safeguards. A matching log/dialog does not prove that a
 server is live or the screen is authentic, and a UI change between checking and
@@ -221,9 +229,11 @@ runtime opt-in file is fixed-format, owner-only, read without following symlinks
 and cleared by the stop command. It is not a shell or environment file.
 
 See [reconnect setup and validation](docs/RECONNECT.md). The read-only handshake
-and real-client capture/OCR negative test passed on the target host. The reported
-dialog's sanitized OCR regression passes with complementary thresholding. Live
-click delivery and unattended reconnect are still pending.
+and real-client capture/OCR negative test passed on the target host. Two
+controlled code-277 recovery tests each sent one click and produced a fresh
+client connection marker; the user confirmed loading into the experience after
+the repeat test. The marker alone cannot prove loading completed. Unattended
+reconnect and retries remain pending.
 
 ## Review and release checks
 

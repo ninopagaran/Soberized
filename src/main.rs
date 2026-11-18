@@ -13,6 +13,7 @@ use std::time::Duration;
 
 mod gamescope_input;
 mod reconnect;
+mod reconnect_image;
 
 fn main() {
     if let Err(error) = run() {
@@ -192,6 +193,8 @@ fn status() -> io::Result<()> {
             "Auto-reconnect: enabled (Gamescope dialog recognition; up to {} attempts).",
             reconnect::MAX_ATTEMPTS
         );
+    } else if controller {
+        println!("Auto-reconnect: disabled; use start --auto-reconnect to enable.");
     }
     let response = if unit_active(false, HELPER_UNIT) {
         Some(Client::connect(Path::new(SOCKET_PATH))?.command(Operation::Status)?)
@@ -578,17 +581,34 @@ fn recovery_observe(
     )? == reconnect::Observation::Reconnected)
 }
 
-fn recognition_failure(error: io::Error, attempt: usize, diagnostic: bool) -> io::Result<()> {
+fn recognition_failure(error: io::Error, attempt: usize, diagnostic: bool) -> io::Result<String> {
     if !reconnect::retryable_recognition(error.kind(), diagnostic) {
         return Err(error);
     }
+    let reason = error.to_string();
     let message = format!(
         "Reconnecting: attempt {attempt}/{} could not verify the dialog; no click sent: {error}",
         reconnect::MAX_ATTEMPTS
     );
     notify::status(&message)?;
     eprintln!("{message}");
-    Ok(())
+    Ok(reason)
+}
+
+fn recovery_wait_status(
+    attempt: usize,
+    limit: usize,
+    remaining: u64,
+    last_issue: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "Reconnecting: attempt {attempt}/{limit} in {}s; movement paused",
+        remaining.div_ceil(1000)
+    );
+    if let Some(issue) = last_issue {
+        message.push_str(&format!(". Last issue: {issue}"));
+    }
+    message
 }
 
 fn recover(
@@ -604,21 +624,29 @@ fn recover(
         let endpoint = gamescope_input::Endpoint::locate(target)?;
         let baseline = (monitor.connection_revision(), monitor.generation());
         let limit = if test { 1 } else { reconnect::MAX_ATTEMPTS };
+        let mut last_issue: Option<String> = None;
         'attempts: loop {
             let backoff = retries.next_delay()?;
             let delay = if test { 10_000 } else { backoff };
-            let message = format!(
-                "Reconnecting: attempt {}/{} in {}s; movement paused, waiting for a matching dialog",
-                retries.attempt(),
-                limit,
-                delay / 1_000
-            );
+            let message =
+                recovery_wait_status(retries.attempt(), limit, delay, last_issue.as_deref());
             notify::status(&message)?;
             eprintln!("{message}");
             let due = lease.check()? + delay;
+            let mut next_status = lease.check()? + 1000;
             while lease.check()? < due {
                 if recovery_observe(lease, target, monitor, baseline, test)? {
                     return Ok(());
+                }
+                let now = lease.check()?;
+                if now >= next_status {
+                    notify::status(&recovery_wait_status(
+                        retries.attempt(),
+                        limit,
+                        due.saturating_sub(now),
+                        last_issue.as_deref(),
+                    ))?;
+                    next_status = now + 1000;
                 }
                 std::thread::sleep(Duration::from_millis(250));
             }
@@ -634,12 +662,17 @@ fn recover(
                 }
             };
             endpoint.verify(target)?;
+            let mut pointer = endpoint.pointer()?;
+            pointer.park()?;
+            if recovery_observe(lease, target, monitor, baseline, test)? {
+                return Ok(());
+            }
             let mut captures = Vec::with_capacity(2);
             for _ in 0..2 {
                 let button = match reconnect::find_button(&endpoint, code) {
                     Ok(button) => button,
                     Err(error) => {
-                        recognition_failure(error, retries.attempt(), test)?;
+                        last_issue = Some(recognition_failure(error, retries.attempt(), test)?);
                         continue 'attempts;
                     }
                 };
@@ -652,14 +685,14 @@ fn recover(
             }
             let second = captures.pop().unwrap();
             if captures[0] != second {
-                recognition_failure(
+                last_issue = Some(recognition_failure(
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         "disconnect dialog changed between captures; no click sent",
                     ),
                     retries.attempt(),
                     test,
-                )?;
+                )?);
                 continue;
             }
             if !matches!(monitor.latest(), Some(roblox_log::Event::Disconnected { code: current, .. }) if *current == code)
@@ -667,7 +700,6 @@ fn recover(
                 return Err(io::Error::other("disconnect state changed; no click sent"));
             }
             endpoint.verify(target)?;
-            let mut pointer = endpoint.pointer()?;
             if recovery_observe(lease, target, monitor, baseline, test)? {
                 return Ok(());
             }
@@ -686,10 +718,19 @@ fn recover(
                 "Reconnecting: click sent; waiting for a fresh client connection marker, movement paused",
             )?;
             let deadline = lease.check()? + reconnect::JOIN_WAIT_MS;
+            let mut next_status = lease.check()? + 1000;
             while lease.check()? < deadline {
                 if recovery_observe(lease, target, monitor, baseline, test)? {
                     eprintln!("A fresh client connection marker was observed after recovery.");
                     return Ok(());
+                }
+                let now = lease.check()?;
+                if now >= next_status {
+                    notify::status(&format!(
+                        "Reconnecting: click sent; waiting for a fresh connection marker ({}s); movement paused",
+                        deadline.saturating_sub(now).div_ceil(1000)
+                    ))?;
+                    next_status = now + 1000;
                 }
                 std::thread::sleep(Duration::from_millis(250));
             }
@@ -698,6 +739,7 @@ fn recover(
                     "no fresh connection marker within 90 seconds; diagnostic ended",
                 ));
             }
+            last_issue = Some("Reconnect click had no fresh connection marker within 90s".into());
         }
     })();
     if let Err(error) = &result {

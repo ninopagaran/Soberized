@@ -7,11 +7,12 @@ cookies, or authentication tickets are required.
 ## Setup
 
 Install the matching current CLI/helper using the
-[update guide](INSTALLATION.md). The user-session frontend needs `libei`; dialog
-recognition also needs Gamescope's control utility, Tesseract 5+, and English data:
+[update guide](INSTALLATION.md). The user-session frontend needs `libei` and
+Leptonica; dialog recognition also needs Gamescope's control utility,
+Tesseract 5+, and English data:
 
 ```sh
-sudo pacman -S --needed gamescope libei tesseract tesseract-data-eng
+sudo pacman -S --needed gamescope libei leptonica tesseract tesseract-data-eng
 ```
 
 With Sober closed, launch:
@@ -57,6 +58,8 @@ Before every click, Soberized:
 
 1. Binds to the Gamescope ancestor of the exact Sober Flatpak instance, verifying
    local socket peer PID/UID. An unrelated Gamescope instance is rejected.
+   Moves that compositor's pointer to its top-left corner without pressing any
+   button, so Sober's drawn cursor cannot cover the button text.
 2. Captures only that compositor's game image into a private temporary directory.
 3. Requires readable English `Disconnected`, `Leave`, `Reconnect`, and the
    matching `Error Code`. Reconnect must be the unique button to Leave's right.
@@ -69,10 +72,14 @@ remote-control portals are not used. The helper's kernel device stays gamepad-on
 The existing Gamescope window stays open; the program does not relaunch Sober or
 switch host workspaces.
 
-OCR first uses global thresholding and, when needed, an adaptive pass on the
-same image to read light buttons on a dark dialog. Both passes share a total
-1.8-second OCR budget. Labels must still meet the original confidence threshold;
-conflicting labels or error codes are rejected.
+OCR first reads the whole game image. If it uniquely verifies the heading,
+Leave label, and matching error code but cannot read Reconnect, it isolates and
+enlarges the expected right-hand button row from that same image using
+Leptonica. A single-line OCR pass must then read exactly one high-confidence
+Reconnect label. The crop predicts a reading region, never a click location;
+click coordinates come from the recognized label and map back to the original
+game surface. Both passes share a total 1.8-second OCR budget. Ambiguous or
+misplaced labels cannot be resolved by the crop.
 
 Images and OCR output are removed after each inspection. Neither is journaled.
 Abrupt termination can leave private capture files in the user runtime directory
@@ -85,6 +92,9 @@ and retry while movement stays paused. Exhausting ten attempts stops recovery;
 client/lease/log errors, socket identity changes, missing dependencies, and manual
 leaves still stop it immediately. Recognition is a heuristic, not proof that a
 UI is trustworthy.
+
+Status counts down to the next attempt and retains the last recognition or
+connection-wait failure. It also explicitly reports when recovery is disabled.
 
 After a click, the worker waits up to 90 seconds for a new join followed by a
 fresh client network marker. Movement stays paused during this wait. A join
@@ -111,8 +121,9 @@ soberized stop
 soberized test-reconnect
 ```
 
-The test waits ten seconds, recognizes the dialog, sends at most one click, and
-waits for a fresh client connection marker. Ctrl+C or `soberized stop` cancels it.
+The test waits ten seconds, parks the Gamescope pointer, recognizes the dialog,
+sends at most one click, and waits for a fresh client connection marker.
+Ctrl+C or `soberized stop` cancels it.
 It does not arm anti-idle movement; run `soberized start --auto-reconnect` afterward.
 If no qualifying disconnect is currently logged, it refuses before preparing
 input or clicking.
@@ -124,13 +135,16 @@ journalctl --user -u soberized-session.service -b --no-pager
 journalctl -u soberized-helper.service -b --no-pager
 ```
 
-On the target Sway host, the Gamescope peer binding and libei sender handshake
-passed without sending input. Capture/OCR also completed on the real client and
-rejected its ordinary game screen. A captured 800×600 code-277 dialog exposed a
-global-threshold OCR miss on the light Reconnect button; its sanitized label-only
-regression now passes using the complementary adaptive reading without lowering
-confidence. Click delivery and unattended reconnect still require a live trial.
-The normal hidden-workspace anti-idle trial does not validate this new feature.
+On the target Sway host, read-only checks passed for the Gamescope peer binding,
+libei sender handshake, and capture/OCR rejection of the ordinary game screen.
+The focused button reading recognized a real 800×600 code-277 dialog. Two
+controlled tests each sent one Reconnect click and observed a fresh client
+connection marker. On the repeat test, moving the Gamescope pointer away first
+also cleared a drawn cursor that obscured the label. The user confirmed that
+the experience finished loading after that test. Unattended retries remain
+unvalidated. Sanitized label-only regressions cover the missed light button
+without retaining game captures or lowering the confidence threshold. The normal
+hidden-workspace anti-idle trial does not validate reconnect.
 
 ## Primary references
 

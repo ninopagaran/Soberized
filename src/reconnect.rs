@@ -175,7 +175,13 @@ impl Scratch {
 }
 impl Drop for Scratch {
     fn drop(&mut self) {
-        for name in ["frame.png", "ocr.tsv", "adaptive.tsv", "preference"] {
+        for name in [
+            "frame.png",
+            "ocr.tsv",
+            "button.png",
+            "button.tsv",
+            "preference",
+        ] {
             let _ = std::fs::remove_file(self.0.join(name));
         }
         let _ = std::fs::remove_dir(&self.0);
@@ -251,15 +257,21 @@ pub fn find_button(endpoint: &Endpoint, code: u16) -> io::Result<Button> {
         std::thread::sleep(Duration::from_millis(10));
     };
     let ocr_deadline = Instant::now() + Duration::from_millis(1800);
-    let normal = ocr(&scratch.0, &frame, "ocr", false, ocr_deadline)?;
+    let normal = ocr(&scratch.0, &frame, "ocr", 11, ocr_deadline)?;
     match detect_button(&normal, dimensions.0, dimensions.1, code) {
         Ok(button) => Ok(button),
         Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-            // A white Reconnect button on a dark dialog can disappear in the
-            // default global threshold. Read the SAME frame adaptively too;
-            // preserve the confidence, error-code, and uniqueness checks.
-            let adaptive = ocr(&scratch.0, &frame, "adaptive", true, ocr_deadline)?;
-            detect_readings(&[&normal, &adaptive], dimensions.0, dimensions.1, code)
+            let reading = Reading::parse(&normal, dimensions.0, dimensions.1)?;
+            let dialog = reading.dialog(code)?;
+            // Never use a crop to bypass conflicting or misplaced labels.
+            if !reading.labels("reconnect").is_empty() {
+                return Err(error);
+            }
+            let crop = dialog.crop()?;
+            let prepared = scratch.0.join("button.png");
+            crate::reconnect_image::prepare(&frame, &prepared, dimensions, crop)?;
+            let text = ocr(&scratch.0, &prepared, "button", 7, ocr_deadline)?;
+            dialog.cropped_button(&text, crop)
         }
         Err(error) => Err(error),
     }
@@ -269,7 +281,7 @@ fn ocr(
     directory: &Path,
     frame: &Path,
     name: &str,
-    adaptive: bool,
+    mode: u8,
     deadline: Instant,
 ) -> io::Result<String> {
     let output = directory.join(name);
@@ -277,10 +289,8 @@ fn ocr(
     command
         .arg(frame)
         .arg(&output)
-        .args(["-l", "eng", "--psm", "11"]);
-    if adaptive {
-        command.args(["-c", "thresholding_method=1"]);
-    }
+        .args(["-l", "eng", "--psm"])
+        .arg(mode.to_string());
     command.arg("tsv");
     let remaining = deadline
         .checked_duration_since(Instant::now())
@@ -324,132 +334,251 @@ fn png_dimensions(path: &Path) -> io::Result<(u32, u32)> {
     Ok((width, height))
 }
 
-pub fn detect_button(tsv: &str, width: u32, height: u32, code: u16) -> io::Result<Button> {
-    detect_readings(&[tsv], width, height, code)
+fn invalid_dialog(message: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{message}; no click sent"),
+    )
 }
 
-fn merge_label(labels: &mut Vec<Button>, incoming: Button) {
-    // Only coalesce readings of the same label BETWEEN threshold passes.
-    if !labels.iter().any(|known| {
-        known.x.abs_diff(incoming.x) <= 4
-            && known.y.abs_diff(incoming.y) <= 4
-            && known.width.abs_diff(incoming.width) <= 8
-            && known.height.abs_diff(incoming.height) <= 4
-    }) {
-        labels.push(incoming);
-    }
+#[derive(Debug)]
+struct Word {
+    text: String,
+    bounds: Button,
 }
 
-fn detect_readings(readings: &[&str], width: u32, height: u32, code: u16) -> io::Result<Button> {
-    let invalid = || {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "matching English disconnect dialog was not identified; no click sent",
-        )
-    };
-    if !recoverable(code) || width == 0 || height == 0 || width > 4096 || height > 2160 {
-        return Err(invalid());
-    }
-    let mut reconnect = Vec::new();
-    let mut leave = Vec::new();
-    let mut headings = Vec::new();
-    let mut matching_code = false;
-    for tsv in readings {
-        let mut text = String::new();
-        let mut pass_reconnect = Vec::new();
-        let mut pass_leave = Vec::new();
-        let mut pass_headings = Vec::new();
+struct Reading {
+    words: Vec<Word>,
+    dimensions: (u32, u32),
+}
+
+impl Reading {
+    fn parse(tsv: &str, width: u32, height: u32) -> io::Result<Self> {
+        if width == 0 || height == 0 || width > 4096 || height > 2160 {
+            return Err(invalid_dialog("invalid OCR dimensions"));
+        }
+        let mut words = Vec::new();
+        let mut text_length = 0;
         for line in tsv.lines().skip(1) {
             if line.len() > 2048 {
-                return Err(invalid());
+                return Err(invalid_dialog("OCR line exceeded its limit"));
             }
             let fields: Vec<_> = line.splitn(12, '\t').collect();
             if fields.len() != 12 || fields[0] != "5" {
                 continue;
             }
-            let confidence: f32 = fields[10].parse().map_err(|_| invalid())?;
+            let confidence: f32 = fields[10]
+                .parse()
+                .map_err(|_| invalid_dialog("invalid OCR confidence"))?;
             if !confidence.is_finite() || confidence < 75.0 {
                 continue;
             }
-            let normalized: String = fields[11]
+            let text: String = fields[11]
                 .chars()
                 .filter(char::is_ascii_alphanumeric)
                 .flat_map(char::to_lowercase)
                 .collect();
-            text.push_str(&normalized);
-            if text.len() > 64 * 1024 {
-                return Err(invalid());
-            }
-            if !matches!(normalized.as_str(), "reconnect" | "leave" | "disconnected") {
+            if text.is_empty() {
                 continue;
+            }
+            text_length += text.len();
+            if text_length > 64 * 1024 {
+                return Err(invalid_dialog("OCR text exceeded its limit"));
             }
             let n: Vec<u32> = fields[6..10]
                 .iter()
-                .map(|s| s.parse().map_err(|_| invalid()))
+                .map(|s| {
+                    s.parse()
+                        .map_err(|_| invalid_dialog("invalid OCR coordinates"))
+                })
                 .collect::<io::Result<_>>()?;
-            let button = Button {
+            let bounds = Button {
                 x: n[0],
                 y: n[1],
                 width: n[2],
                 height: n[3],
             };
-            if button.width == 0
-                || button.height == 0
-                || button.x.saturating_add(button.width) > width
-                || button.y.saturating_add(button.height) > height
+            if bounds.width == 0
+                || bounds.height == 0
+                || bounds.x.saturating_add(bounds.width) > width
+                || bounds.y.saturating_add(bounds.height) > height
             {
-                return Err(invalid());
+                return Err(invalid_dialog("OCR text outside the image"));
             }
-            match normalized.as_str() {
-                "reconnect" => pass_reconnect.push(button),
-                "leave" => pass_leave.push(button),
-                _ => pass_headings.push(button),
+            words.push(Word { text, bounds });
+        }
+        Ok(Self {
+            words,
+            dimensions: (width, height),
+        })
+    }
+
+    fn labels(&self, text: &str) -> Vec<&Button> {
+        self.words
+            .iter()
+            .filter(|w| w.text == text)
+            .map(|w| &w.bounds)
+            .collect()
+    }
+
+    fn unique(&self, text: &str) -> io::Result<Button> {
+        let labels = self.labels(text);
+        if labels.len() != 1 {
+            return Err(invalid_dialog(&format!(
+                "dialog {text} label is not unique (found {})",
+                labels.len()
+            )));
+        }
+        Ok(labels[0].clone())
+    }
+
+    fn dialog(&self, expected_code: u16) -> io::Result<Dialog> {
+        if !recoverable(expected_code) {
+            return Err(invalid_dialog("disconnect reason is not eligible"));
+        }
+        let heading = self.unique("disconnected")?;
+        let leave = self.unique("leave")?;
+        let (width, height) = self.dimensions;
+        if heading.y + heading.height >= leave.y
+            || leave.y <= height / 4
+            || leave.y >= height * 9 / 10
+            || leave.center().0 >= heading.center().0
+        {
+            return Err(invalid_dialog("unexpected disconnect dialog layout"));
+        }
+        let mut codes = Vec::new();
+        for start in 0..self.words.len() {
+            for count in 1..=3 {
+                let Some(parts) = self.words.get(start..start + count) else {
+                    continue;
+                };
+                let combined: String = parts.iter().map(|w| w.text.as_str()).collect();
+                let Some(code) = combined
+                    .strip_prefix("errorcode")
+                    .and_then(|s| s.parse::<u16>().ok())
+                else {
+                    continue;
+                };
+                let top = parts.iter().map(|w| w.bounds.y).min().unwrap();
+                let bottom = parts
+                    .iter()
+                    .map(|w| w.bounds.y + w.bounds.height)
+                    .max()
+                    .unwrap();
+                let left = parts.iter().map(|w| w.bounds.x).min().unwrap();
+                let right = parts
+                    .iter()
+                    .map(|w| w.bounds.x + w.bounds.width)
+                    .max()
+                    .unwrap();
+                let max_height = parts.iter().map(|w| w.bounds.height).max().unwrap();
+                let aligned = parts.windows(2).all(|pair| {
+                    pair[0].bounds.y.abs_diff(pair[1].bounds.y) <= max_height / 2
+                        && pair[1].bounds.x >= pair[0].bounds.x + pair[0].bounds.width
+                        && pair[1]
+                            .bounds
+                            .x
+                            .saturating_sub(pair[0].bounds.x + pair[0].bounds.width)
+                            <= max_height * 4
+                });
+                if aligned
+                    && top > heading.y + heading.height
+                    && bottom < leave.y
+                    && (left + (right - left) / 2).abs_diff(heading.center().0) <= width / 8
+                {
+                    codes.push(code);
+                }
             }
         }
-        if pass_reconnect.len() > 1 || pass_leave.len() > 1 || pass_headings.len() > 1 {
-            return Err(invalid());
+        if codes.as_slice() != [expected_code] {
+            return Err(invalid_dialog(
+                "matching error code was not uniquely located inside the dialog",
+            ));
         }
-        for label in pass_reconnect {
-            merge_label(&mut reconnect, label);
-        }
-        for label in pass_leave {
-            merge_label(&mut leave, label);
-        }
-        for label in pass_headings {
-            merge_label(&mut headings, label);
-        }
-        matching_code |= text.contains(&format!("errorcode{code}"));
-        for other in [266, 277, 278] {
-            if other != code && text.contains(&format!("errorcode{other}")) {
-                return Err(invalid());
-            }
-        }
+        Ok(Dialog {
+            heading,
+            leave,
+            dimensions: self.dimensions,
+        })
     }
-    if reconnect.len() != 1 || leave.len() != 1 || headings.len() != 1 || !matching_code {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "disconnect dialog not verified (heading={}, Leave={}, Reconnect={}, matching code={matching_code}); no click sent",
-                headings.len(),
-                leave.len(),
-                reconnect.len()
-            ),
-        ));
+}
+
+struct Dialog {
+    heading: Button,
+    leave: Button,
+    dimensions: (u32, u32),
+}
+
+impl Dialog {
+    fn validate(&self, target: &Button) -> io::Result<()> {
+        if target.x <= self.leave.x + self.leave.width
+            || target.y.abs_diff(self.leave.y) > target.height.max(self.leave.height)
+            || target.y <= self.heading.y + self.heading.height
+        {
+            return Err(invalid_dialog("unexpected Reconnect label position"));
+        }
+        Ok(())
     }
-    let target = reconnect.remove(0);
-    let left = &leave[0];
-    let heading = &headings[0];
-    // The expected two-button dialog: Leave on the left, Reconnect on the
-    // same row, both below Disconnected. Ambiguous layouts fail closed.
-    if target.x <= left.x
-        || target.y.abs_diff(left.y) > target.height.max(left.height)
-        || heading.y.saturating_add(heading.height) >= target.y
-        || target.y <= height / 4
-        || target.y >= height * 9 / 10
-    {
-        return Err(invalid());
+
+    fn crop(&self) -> io::Result<crate::reconnect_image::Crop> {
+        let center = self.heading.center().0;
+        let gap = center.saturating_sub(self.leave.center().0);
+        if gap < self.leave.width || gap > self.dimensions.0 / 3 {
+            return Err(invalid_dialog("cannot isolate the Reconnect button row"));
+        }
+        let width = gap * 2;
+        let padding = self.leave.height.max(8);
+        let y = self
+            .leave
+            .y
+            .checked_sub(padding)
+            .ok_or_else(|| invalid_dialog("invalid button row"))?;
+        let height = self.leave.height + padding * 2;
+        if center + width > self.dimensions.0 || y + height > self.dimensions.1 {
+            return Err(invalid_dialog("button row would exceed image bounds"));
+        }
+        // Predict only a reading region from the centered, two-button layout.
+        // No click is allowed unless this region actually reads "Reconnect".
+        let scale = 30u32
+            .div_ceil(self.leave.height)
+            .clamp(1, 3)
+            .min(4096 / width);
+        Ok(crate::reconnect_image::Crop {
+            x: center,
+            y,
+            width,
+            height,
+            scale,
+        })
     }
-    Ok(target)
+
+    fn cropped_button(&self, tsv: &str, crop: crate::reconnect_image::Crop) -> io::Result<Button> {
+        let (width, height) = crop.dimensions();
+        let reading = Reading::parse(tsv, width, height)?;
+        if reading.words.len() != 1 || reading.words[0].text != "reconnect" {
+            return Err(invalid_dialog(
+                "isolated button did not uniquely read Reconnect",
+            ));
+        }
+        let word = &reading.words[0].bounds;
+        let (x, y, width, height) = crop.map_bounds(word.x, word.y, word.width, word.height)?;
+        let button = Button {
+            x,
+            y,
+            width,
+            height,
+        };
+        self.validate(&button)?;
+        Ok(button)
+    }
+}
+
+pub fn detect_button(tsv: &str, width: u32, height: u32, code: u16) -> io::Result<Button> {
+    let reading = Reading::parse(tsv, width, height)?;
+    let dialog = reading.dialog(code)?;
+    let button = reading.unique("reconnect")?;
+    dialog.validate(&button)?;
+    Ok(button)
 }
 
 #[cfg(test)]
@@ -605,13 +734,9 @@ mod tests {
         assert!(retryable_recognition(io::ErrorKind::TimedOut, false));
     }
 
-    #[test]
-    fn complementary_thresholds_recognize_a_white_button_on_a_dark_dialog() {
-        // Sanitized label-only OCR output from the reported 800x600 dialog.
-        // Global thresholding read the heading, code, and Leave but missed the
-        // Reconnect label; adaptive Otsu read Reconnect at high confidence.
+    fn reported_context() -> String {
         let header = fixture().lines().next().unwrap().to_owned();
-        let normal = format!(
+        format!(
             "{header}\n\
             5\t1\t1\t1\t1\t1\t343\t193\t115\t15\t90.830803\tDisconnected\n\
             5\t1\t1\t1\t1\t1\t343\t302\t37\t15\t82.279396\t(Error\n\
@@ -619,27 +744,122 @@ mod tests {
             5\t1\t1\t1\t1\t1\t430\t302\t27\t15\t90.481079\t277)\n\
             5\t1\t1\t1\t1\t1\t290\t382\t38\t11\t93.030396\tLeave\n\
             5\t1\t1\t1\t1\t1\t494\t385\t13\t8\t24.901749\tnn;\n"
-        );
-        let adaptive =
-            format!("{header}\n5\t1\t1\t1\t1\t1\t459\t382\t69\t11\t92.552551\tReconnect\n");
-        assert!(detect_button(&normal, 800, 600, 277).is_err());
-        assert!(detect_button(&adaptive, 800, 600, 277).is_err());
-        let button = detect_readings(&[&normal, &adaptive], 800, 600, 277).unwrap();
-        assert_eq!(button.center(), (493, 387));
-        assert!(detect_readings(&[&normal, &adaptive], 800, 600, 278).is_err());
-        let low_confidence = adaptive.replace("92.552551", "30");
-        assert!(detect_readings(&[&normal, &low_confidence], 800, 600, 277).is_err());
+        )
     }
 
     #[test]
-    fn threshold_passes_coalesce_only_agreeing_labels_and_reject_conflicts() {
-        let normal = fixture();
-        assert!(detect_readings(&[&normal, &normal], 800, 600, 277).is_ok());
-        let moved = normal.replace("\t440\t340\t", "\t480\t340\t");
-        assert!(detect_readings(&[&normal, &moved], 800, 600, 277).is_err());
-        let other_code = normal.replace("277)", "278)");
-        assert!(detect_readings(&[&normal, &other_code], 800, 600, 277).is_err());
-        let duplicate = format!("{normal}5\t1\t1\t1\t1\t1\t440\t340\t100\t20\t95\tReconnect\n");
-        assert!(detect_readings(&[&normal, &duplicate], 800, 600, 277).is_err());
+    fn button_crop_requires_valid_context_and_a_real_high_confidence_label() {
+        let normal = reported_context();
+        assert!(detect_button(&normal, 800, 600, 277).is_err());
+        let reading = Reading::parse(&normal, 800, 600).unwrap();
+        let dialog = reading.dialog(277).unwrap();
+        let crop = dialog.crop().unwrap();
+        assert_eq!(
+            crop,
+            crate::reconnect_image::Crop {
+                x: 400,
+                y: 371,
+                width: 182,
+                height: 33,
+                scale: 3
+            }
+        );
+        let header = fixture().lines().next().unwrap().to_owned();
+        let isolated = format!("{header}\n5\t1\t1\t1\t1\t1\t177\t33\t207\t33\t92.55\tReconnect\n");
+        let button = dialog.cropped_button(&isolated, crop).unwrap();
+        assert_eq!(button.center(), (493, 387));
+        assert!(
+            dialog
+                .cropped_button(&isolated.replace("92.55", "30"), crop)
+                .is_err()
+        );
+        assert!(
+            dialog
+                .cropped_button(&isolated.replace("Reconnect", "Leave"), crop)
+                .is_err()
+        );
+        assert!(
+            dialog
+                .cropped_button(&isolated.replace("\t177\t33\t", "\t0\t33\t"), crop)
+                .is_err()
+        );
+        assert!(reading.dialog(278).is_err());
+    }
+
+    #[test]
+    fn context_cannot_borrow_error_codes_from_elsewhere_or_resolve_ambiguity_with_a_crop() {
+        let normal = reported_context();
+        let unrelated = normal.replace("\t302\t", "\t50\t");
+        assert!(
+            Reading::parse(&unrelated, 800, 600)
+                .unwrap()
+                .dialog(277)
+                .is_err()
+        );
+        let duplicate = format!("{normal}5\t1\t1\t1\t1\t1\t350\t190\t100\t20\t95\tDisconnected\n");
+        assert!(
+            Reading::parse(&duplicate, 800, 600)
+                .unwrap()
+                .dialog(277)
+                .is_err()
+        );
+        let header = fixture().lines().next().unwrap().to_owned();
+        let dialog = Reading::parse(&normal, 800, 600)
+            .unwrap()
+            .dialog(277)
+            .unwrap();
+        let crop = dialog.crop().unwrap();
+        let multiple = format!(
+            "{header}\n\
+            5\t1\t1\t1\t1\t1\t177\t33\t207\t33\t95\tReconnect\n\
+            5\t1\t1\t1\t1\t1\t10\t10\t100\t20\t95\tReconnect\n"
+        );
+        assert!(dialog.cropped_button(&multiple, crop).is_err());
+        let extra_text =
+            multiple.replace("10\t10\t100\t20\t95\tReconnect", "10\t10\t100\t20\t95\tBuy");
+        assert!(dialog.cropped_button(&extra_text, crop).is_err());
+    }
+
+    #[test]
+    fn changed_or_out_of_bounds_dialog_geometry_is_rejected() {
+        let normal = reported_context();
+        let leave_on_right = normal.replace("\t290\t382\t", "\t500\t382\t");
+        assert!(
+            Reading::parse(&leave_on_right, 800, 600)
+                .unwrap()
+                .dialog(277)
+                .is_err()
+        );
+        let low_leave = normal.replace("\t93.030396\tLeave", "\t20\tLeave");
+        assert!(
+            Reading::parse(&low_leave, 800, 600)
+                .unwrap()
+                .dialog(277)
+                .is_err()
+        );
+        let dialog = Reading::parse(&normal, 800, 600)
+            .unwrap()
+            .dialog(277)
+            .unwrap();
+        assert!(
+            dialog
+                .validate(&Button {
+                    x: 290,
+                    y: 382,
+                    width: 69,
+                    height: 11
+                })
+                .is_err()
+        );
+        assert!(
+            dialog
+                .validate(&Button {
+                    x: 459,
+                    y: 430,
+                    width: 69,
+                    height: 11
+                })
+                .is_err()
+        );
     }
 }
