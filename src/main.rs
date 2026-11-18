@@ -129,6 +129,7 @@ fn stop() -> io::Result<()> {
 }
 
 fn status() -> io::Result<()> {
+    println!("Soberized {}", env!("CARGO_PKG_VERSION"));
     installed()?;
     let session = units::query(true, USER_UNIT)?;
     if session.failed() {
@@ -375,6 +376,10 @@ impl SessionLease {
 
 fn session() -> io::Result<()> {
     installed()?;
+    eprintln!(
+        "Soberized session {}: preparing a neutral controller",
+        env!("CARGO_PKG_VERSION")
+    );
     let mut lease = SessionLease::prepare()?;
     let startup_deadline = lease.last_check + 30_000;
     notify::status("Waiting for Sober startup; virtual controller prepared, movement disabled")?;
@@ -470,6 +475,7 @@ fn session() -> io::Result<()> {
 }
 
 fn doctor(sandbox_test: bool) -> io::Result<()> {
+    println!("Soberized CLI: {}", env!("CARGO_PKG_VERSION"));
     let mut ready = true;
     let output = Command::new("/usr/bin/flatpak")
         .args(["info", APP_ID])

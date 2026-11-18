@@ -16,6 +16,15 @@ startup detection. It must pass the focused movement test below before another
 unattended idle trial. Build, kernel-write, and sidecar SDL checks cannot pass
 that gate. An earlier manual interaction also invalidated the initial idle test.
 
+A later focused test produced visible movement. The following trial, with Sober
+hidden on another workspace, still ended at 10:39:38 Asia/Manila with idle error
+278 after three pulses: a diagnostic at 10:14:14 and scheduled pulses at 10:24:15
+and 10:34:15. Each deflection had a neutral reset roughly 250 ms later. An audit
+found `/usr/bin/soberized` and its installed helper were still the 0.2.0 build;
+the repo's 0.3.0 release artifact had not been installed. This trial cannot
+validate or invalidate the new launch order, and the focused success cannot be
+attributed to that change. The launcher already had the SDL background hint set.
+
 ## 1. Before creating a controller
 
 Run as the desktop user:
@@ -30,6 +39,8 @@ org.vinegarhq.Sober`, `systemctl --version`, and the build version. Record wheth
 the current user already has `input` group membership or access to `/dev/uinput`.
 Soberized must not add either permission. A pre-existing broad permission is
 outside Soberized's isolation boundary; inspect its origin separately.
+After installation, check `soberized --version` against the release being tested;
+a version from `target/release/soberized` alone does not identify installed code.
 
 Inspect the installer and unit files, build the release, install, then run:
 
@@ -65,7 +76,11 @@ pulse after a ten-second delay. Confirm the avatar briefly steps and returns to
 rest after roughly 250 ms plus scheduler latency. There must be no continuing
 movement, held buttons, desktop typing, mouse movement, or focus change. Confirm
 which behavior the left-stick pulse produces in the chosen experience. Repeat
-while Sober is on another workspace after the diagnostic cooldown has elapsed.
+with Roblox still visible but a terminal focused beside it. Observe the pulse
+without returning focus to Roblox: this distinguishes focused delivery from
+background delivery without waiting for an idle timeout. Only then test another
+workspace after the diagnostic cooldown has elapsed. Returning focus can itself
+change idle behavior and must not be counted as proof of background input.
 Check the journal for matching `phase=deflect` and `phase=neutral` records. Then
 verify the normal ten-minute cadence without requesting further diagnostics.
 

@@ -14,6 +14,10 @@ afterward. Whether the input resets an experience's idle timer needs testing.
 Both the 0.1 camera pulse and 0.2 movement pulse failed idle testing. In the 0.2
 focused diagnostic, the user saw no avatar movement despite successful kernel
 writes and a separate SDL reader receiving the signal inside Sober's sandbox.
+A later focused test did produce visible movement, but a further hidden-workspace
+trial still ended with idle error 278. That run used the installed 0.2.0 binaries;
+the 0.3.0 build had not been installed. Visible movement alone does not establish
+idle prevention or prove that startup order caused the successful input test.
 
 Version 0.3 prepares a **neutral controller before launching Sober**, waits for
 its event node to be readable, and enables movement only after a game join. This
@@ -168,6 +172,7 @@ soberized stop
 cargo build --release --locked --offline
 sudo ./scripts/install.sh --user nino
 systemctl --user daemon-reload
+soberized --version
 soberized launch
 ```
 
@@ -175,6 +180,10 @@ The 0.3 protocol rejects helpers without neutral preparation. An incompatible
 helper error means the installed CLI/helper or the still-running old session must
 be updated together. `start` attaches to an existing instance and cannot repeat
 the controller-before-Sober startup sequence; use `launch` for this diagnostic.
+Verify that the installed command reports `soberized 0.3.0` before testing this
+release. Building in `target/release` does not update `/usr/bin/soberized` or the
+root-owned helper. Status, doctor, and new runtime journal records include their
+build version to make this distinction visible.
 
 ## Sway shortcut and stopping
 

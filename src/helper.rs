@@ -69,7 +69,10 @@ pub fn run(owner_uid: u32) -> io::Result<()> {
     // All capabilities, allocation, and trusted startup finish before any
     // accept/recv. Failure to install the sandbox removes the controller.
     crate::sandbox::lock_down()?;
-    eprintln!("Soberized helper: fixed gamepad created; syscall sandbox installed");
+    eprintln!(
+        "Soberized helper {}: fixed gamepad created; syscall sandbox installed",
+        env!("CARGO_PKG_VERSION")
+    );
     event_loop(listener, &mut gamepad, owner_uid, schedule, clients)
 }
 
