@@ -58,6 +58,7 @@ pub enum Effect {
 
 pub struct Schedule {
     owner: Option<u64>,
+    armed: bool,
     startup_deadline: u64,
     lease_deadline: u64,
     next_pulse: u64,
@@ -73,6 +74,7 @@ impl Schedule {
     pub fn new(now: u64) -> Self {
         Self {
             owner: None,
+            armed: false,
             startup_deadline: now.saturating_add(STARTUP_MS),
             lease_deadline: 0,
             next_pulse: 0,
@@ -87,11 +89,19 @@ impl Schedule {
 
     pub fn command(&mut self, client: u64, command: Command, now: u64) -> Response {
         let code = match command {
+            Command::Prepare if self.stop_reason.is_some() => ReplyCode::NotOwner,
+            Command::Prepare if self.owner.is_some() => ReplyCode::Busy,
+            Command::Prepare => {
+                self.owner = Some(client);
+                self.lease_deadline = now.saturating_add(LEASE_MS);
+                ReplyCode::Ok
+            }
             Command::Arm if self.owner.is_some() && self.owner != Some(client) => ReplyCode::Busy,
             Command::Arm if self.stop_reason.is_some() => ReplyCode::NotOwner,
             Command::Arm => {
-                if self.owner.is_none() {
+                if !self.armed {
                     self.owner = Some(client);
+                    self.armed = true;
                     self.next_pulse = now.saturating_add(INTERVAL_MS);
                 }
                 self.lease_deadline = now.saturating_add(LEASE_MS);
@@ -107,9 +117,7 @@ impl Schedule {
                 ReplyCode::Ok
             }
             Command::Status => ReplyCode::Ok,
-            Command::TestInput if self.owner.is_none() || self.stop_reason.is_some() => {
-                ReplyCode::NotOwner
-            }
+            Command::TestInput if !self.armed || self.stop_reason.is_some() => ReplyCode::NotOwner,
             Command::TestInput
                 if self.pulse_end.is_some()
                     || self.test_due.is_some()
@@ -165,7 +173,7 @@ impl Schedule {
                 self.pulse_end = None;
                 return Effect::Neutral;
             }
-        } else if self.owner.is_some()
+        } else if self.armed
             && (self.test_due.is_some_and(|due| now >= due) || now >= self.next_pulse)
         {
             let kind = if self.test_due.is_some_and(|due| now >= due) {
@@ -188,13 +196,15 @@ impl Schedule {
         Response {
             state: if self.owner.is_none() || self.stop_reason.is_some() {
                 State::Ready
+            } else if !self.armed {
+                State::Prepared
             } else if self.pulse_end.is_some() {
                 State::Pulsing
             } else {
                 State::Armed
             },
             code,
-            next_seconds: if self.owner.is_some() && self.stop_reason.is_none() {
+            next_seconds: if self.armed && self.stop_reason.is_none() {
                 self.test_due
                     .unwrap_or(self.next_pulse)
                     .saturating_sub(now)
@@ -244,6 +254,82 @@ mod tests {
             advance(&mut s, INTERVAL_MS + 500, INTERVAL_MS * 2),
             Effect::Pulse(-AMPLITUDE, PulseKind::Scheduled)
         );
+    }
+
+    #[test]
+    fn preparation_never_moves_until_the_owner_arms_after_join() {
+        let mut s = Schedule::new(0);
+        let prepared = s.command(1, Command::Prepare, 0);
+        assert_eq!(prepared.code, ReplyCode::Ok);
+        assert_eq!(prepared.state, State::Prepared);
+        assert_eq!(prepared.next_seconds, 0);
+        assert_eq!(s.command(2, Command::Prepare, 0).code, ReplyCode::Busy);
+        assert_eq!(s.command(2, Command::Arm, 0).code, ReplyCode::Busy);
+        assert_eq!(s.command(2, Command::Renew, 0).code, ReplyCode::NotOwner);
+        assert_eq!(
+            s.command(2, Command::TestInput, 0).code,
+            ReplyCode::NotOwner
+        );
+        // A home-screen wait longer than the pulse interval must stay neutral.
+        assert_eq!(advance(&mut s, 0, INTERVAL_MS * 2), Effect::None);
+        assert_eq!(s.pulse_count(), 0);
+        assert_eq!(s.response(ReplyCode::Ok, INTERVAL_MS * 2).next_seconds, 0);
+        let armed_at = INTERVAL_MS * 2;
+        let armed = s.command(1, Command::Arm, armed_at);
+        assert_eq!(armed.state, State::Armed);
+        assert_eq!(armed.next_seconds, 600);
+        assert_eq!(
+            s.command(1, Command::Prepare, armed_at).code,
+            ReplyCode::Busy
+        );
+        assert_eq!(
+            advance(&mut s, armed_at, armed_at + INTERVAL_MS),
+            Effect::Pulse(AMPLITUDE, PulseKind::Scheduled)
+        );
+    }
+
+    #[test]
+    fn preparation_retains_the_same_fail_closed_lifetime_as_armed_input() {
+        for mode in 0..5 {
+            let mut s = Schedule::new(1_000);
+            s.command(1, Command::Prepare, 1_000);
+            let reason = match mode {
+                0 => {
+                    s.disconnect(1);
+                    s.tick(1_001)
+                }
+                1 => {
+                    for now in (1_000..1_000 + LEASE_MS).step_by(1_000) {
+                        s.command(2, Command::Status, now);
+                        assert_eq!(s.tick(now), Effect::None);
+                    }
+                    s.tick(1_000 + LEASE_MS)
+                }
+                2 => s.tick(1_000 + MAX_TICK_GAP_MS + 1),
+                3 => s.tick(999),
+                _ => {
+                    s.command(2, Command::Stop, 1_001);
+                    s.tick(1_001)
+                }
+            };
+            assert_eq!(
+                reason,
+                Effect::Exit(
+                    [
+                        StopReason::OwnerDisconnected,
+                        StopReason::LeaseExpired,
+                        StopReason::SchedulingGap,
+                        StopReason::ClockRegression,
+                        StopReason::Requested,
+                    ][mode]
+                )
+            );
+            assert_eq!(s.pulse_count(), 0);
+            assert_eq!(
+                s.command(1, Command::Prepare, 1_002).code,
+                ReplyCode::NotOwner
+            );
+        }
     }
 
     #[test]

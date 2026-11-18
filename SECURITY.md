@@ -69,17 +69,20 @@ commands, truncated/oversized packets, and unexpected fields close the client.
 `MSG_TRUNC` detects a valid-looking prefix with extra data. `recvmsg/sendmsg` are
 not allowed; no descriptor exchange is part of the protocol.
 
-Only Arm, Renew, Stop, Status, and a fixed TestInput diagnostic exist. Protocol
-version 2 rejects the old camera-only helper. A single connection owns the lease;
+Only Prepare, Arm, Renew, Stop, Status, and a fixed TestInput diagnostic exist.
+Protocol version 3 rejects helpers without neutral preparation. Prepare acquires
+the same single-owner, 30-second lease as Arm but permits no scheduled or test
+pulses. Only that owner can arm the prepared controller; another Prepare cannot
+replace it or postpone an armed pulse. A single connection owns the lease;
 another client cannot renew or replace it. Authorized clients may stop it. The
 helper permits at most eight clients, bounded acceptance work, a five-second
-unarmed startup window, and five-second idle non-owner connections. Systemd also
+unowned startup window, and five-second idle non-owner connections. Systemd also
 limits CPU, memory, tasks, descriptors, and activation frequency.
 
 Pulse parameters are fixed: 600 seconds between scheduled starts, left-stick X
 amplitude 16384, 250 ms duration, alternating direction, full neutral reset. No
 initial pulse occurs on arm. An authorized diagnostic request queues this same
-pulse after ten seconds, requires a live owner lease, and has a one-minute
+pulse after ten seconds, requires an armed owner lease, and has a one-minute
 cooldown during the helper lifetime. It cannot renew that lease or provide raw
 events, axes, amplitudes, durations, or arbitrary timing. A queued diagnostic
 replaces the next scheduled pulse so the two do not collide. A local attacker
@@ -94,6 +97,11 @@ Leases last 30 seconds and renew every 10 seconds. Both helper and controller us
 `CLOCK_BOOTTIME`, including suspended time. Gaps above five seconds terminate the
 session, and expired leases are checked before renewal. No catch-up is attempted.
 The controller binds to one Flatpak instance ID/PID and stops on loss/change.
+For `launch`, it first prepares the neutral controller and waits up to 30 seconds
+for Sober to appear. The launcher waits for a readable gamepad event node before
+starting Flatpak. This uses sysfs names, character-node metadata, and an access
+check; it does not open or read physical input devices, change permissions, or
+change the helper's syscall filter. Launch errors stop the session worker.
 
 The unprivileged session controller observes joins and disconnects in Sober's
 engine log. It waits for a join before arming and drops its lease on an observed

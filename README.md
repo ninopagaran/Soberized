@@ -11,9 +11,16 @@ to neutral. Pulse direction alternates. **This briefly moves your avatar.** Park
 on safe, flat ground; alternating directions cannot guarantee the same position
 afterward. Whether the input resets an experience's idle timer needs testing.
 
-Version 0.2 replaces the camera-only pulse that failed the initial overnight
-idle test. It also watches Roblox's engine log and stops the input session on an
-observed disconnect, including idle error 278. It does not reconnect automatically.
+Both the 0.1 camera pulse and 0.2 movement pulse failed idle testing. In the 0.2
+focused diagnostic, the user saw no avatar movement despite successful kernel
+writes and a separate SDL reader receiving the signal inside Sober's sandbox.
+
+Version 0.3 prepares a **neutral controller before launching Sober**, waits for
+its event node to be readable, and enables movement only after a game join. This
+removes late controller creation from the launch path; whether it resolves
+Sober/Roblox's input handling still needs a focused diagnostic and unattended
+trial. The client log monitor stops input on an observed disconnect, including
+idle error 278. Soberized does not reconnect automatically.
 
 ## Security design
 
@@ -125,7 +132,12 @@ it is narrower than `--device=all`, but is **not** a per-controller permission.
 With Sober already launched with appropriate access, use `soberized start`.
 Starting cannot retrofit device permissions into an existing Flatpak sandbox.
 
-On launch, status first shows `Waiting for a Roblox game join`. Join an experience
+On launch, the user worker first acquires a neutral-only lease. Once the helper
+confirms preparation and udev grants normal access to the matching event node,
+Sober launches with the controller already present. The worker renews its lease
+while waiting for startup and a game join; no pulses or diagnostics are allowed
+in that phase. Startup failure removes the controller. Status shows
+`Waiting for a Roblox game join`. Join an experience
 and stand in a safe location; the controller then arms. An observed Roblox error
 stops input and remains visible in `soberized status` with the reason and pulse
 count. After rejoining, run `soberized start` to begin a new session.
@@ -148,20 +160,21 @@ Follow [the host validation procedure](docs/VALIDATION.md) before depending on
 anti-idle behavior. An “Armed” status means the scheduler owns a lease, not that
 Roblox has confirmed idle prevention.
 
-When updating from 0.1, stop the old session, rebuild, and reinstall both binaries
-and the service files:
+When updating, stop the old session, rebuild, and reinstall both binaries and the
+service files. Close Sober before testing the new launch order:
 
 ```sh
 soberized stop
 cargo build --release --locked --offline
 sudo ./scripts/install.sh --user nino
 systemctl --user daemon-reload
-soberized start
+soberized launch
 ```
 
-The 0.2 protocol deliberately rejects the old camera-only helper. An incompatible
+The 0.3 protocol rejects helpers without neutral preparation. An incompatible
 helper error means the installed CLI/helper or the still-running old session must
-be updated together.
+be updated together. `start` attaches to an existing instance and cannot repeat
+the controller-before-Sober startup sequence; use `launch` for this diagnostic.
 
 ## Sway shortcut and stopping
 

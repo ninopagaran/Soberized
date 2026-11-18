@@ -3,7 +3,7 @@ use std::io;
 
 pub const REQUEST_LEN: usize = 8;
 pub const RESPONSE_LEN: usize = 16;
-const MAGIC: [u8; 4] = [b'S', b'B', b'Z', 2];
+const MAGIC: [u8; 4] = [b'S', b'B', b'Z', 3];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -13,6 +13,7 @@ pub enum Command {
     Stop = 3,
     Status = 4,
     TestInput = 5,
+    Prepare = 6,
 }
 
 impl Command {
@@ -33,6 +34,7 @@ impl Command {
             3 => Ok(Self::Stop),
             4 => Ok(Self::Status),
             5 => Ok(Self::TestInput),
+            6 => Ok(Self::Prepare),
             _ => Err(invalid()),
         }
     }
@@ -44,6 +46,7 @@ pub enum State {
     Ready = 0,
     Armed = 1,
     Pulsing = 2,
+    Prepared = 3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +84,7 @@ impl Response {
             0 => State::Ready,
             1 => State::Armed,
             2 => State::Pulsing,
+            3 => State::Prepared,
             _ => return Err(invalid()),
         };
         let code = match bytes[5] {
@@ -117,6 +121,7 @@ mod tests {
             Command::Stop,
             Command::Status,
             Command::TestInput,
+            Command::Prepare,
         ] {
             assert_eq!(Command::decode(&command.encode()).unwrap(), command);
         }
@@ -147,18 +152,20 @@ mod tests {
     }
 
     #[test]
-    fn old_camera_only_helper_is_not_accepted_as_the_movement_helper() {
-        let mut request = Command::Arm.encode();
-        request[3] = 1;
-        assert!(Command::decode(&request).is_err());
-        let mut response = Response {
-            state: State::Armed,
-            code: ReplyCode::Ok,
-            next_seconds: 600,
-            pulses: 0,
+    fn helpers_without_neutral_preparation_are_not_accepted() {
+        for version in [1, 2] {
+            let mut request = Command::Prepare.encode();
+            request[3] = version;
+            assert!(Command::decode(&request).is_err());
+            let mut response = Response {
+                state: State::Prepared,
+                code: ReplyCode::Ok,
+                next_seconds: 0,
+                pulses: 0,
+            }
+            .encode();
+            response[3] = version;
+            assert!(Response::decode(&response).is_err());
         }
-        .encode();
-        response[3] = 1;
-        assert!(Response::decode(&response).is_err());
     }
 }

@@ -1,11 +1,20 @@
 # Host validation gates
 
-Status: **0.1 host checks passed, but its camera-only overnight test failed with
-idle error 278. Version 0.2's movement profile requires a fresh unattended trial.**
-A live diagnostic confirmed a 50% left-stick signal and neutral reset in SDL
-inside Sober's sandbox. The user also interacted with Roblox during that test,
-so it did not establish whether the signal resets the idle timer. Build and
-controller-delivery checks do not prove background anti-idle compatibility.
+Status: **0.1 and 0.2 both failed idle testing. Version 0.3 prepares the controller
+before Sober starts; its behavior in the actual game remains unverified.**
+
+On 2026-11-18, the 0.2 helper wrote and reset four 250 ms movement pulses at
+09:16, 09:26, 09:36, and 09:46 Asia/Manila. Roblox reported idle error 278 at
+09:48:12 (`01:48:12Z`); the worker stopped after four pulses. Later focused
+diagnostics produced no visible avatar movement although WASD worked with chat
+and menus closed. A separate SDL reader inside Sober's sandbox could open the
+virtual controller, and a running SDL reader noticed removal/addition. These
+checks do not establish what Sober/Roblox consumed or why it ignored movement.
+
+Version 0.3 removes late device creation from `launch` as a controlled test of
+startup detection. It must pass the focused movement test below before another
+unattended idle trial. Build, kernel-write, and sidecar SDL checks cannot pass
+that gate. An earlier manual interaction also invalidated the initial idle test.
 
 ## 1. Before creating a controller
 
@@ -39,8 +48,11 @@ An offline systemd security score is a review aid, not proof of confinement.
 ## 2. Prove the fixed gamepad reaches Sober
 
 Enable gamepad support through `flatpak run org.vinegarhq.Sober config`. Close any
-running Sober instance, then run `soberized launch` and join a controller-enabled
-experience. Check `soberized status` and both service journals.
+running Sober instance, then run `soberized launch`. Before joining, verify that
+the virtual controller already exists and status says movement is disabled while
+waiting for a join. Leave the home screen idle for more than ten minutes: the
+pulse count must remain zero and `test-input` must be refused. Join a
+controller-enabled experience. Check `soberized status` and both service journals.
 
 Use `/proc/bus/input/devices` or the corresponding sysfs device to identify the
 controller by `Soberized Virtual Gamepad`. Verify one device only, the intended
@@ -92,7 +104,9 @@ alone. Test other games only after stopping Soberized.
 - Suspend/resume: verify neutral/device removal and no pulse replay; resume
   requires explicit start. Run `soberized stop` before locking via your lock hook.
 - Open a second client: another Arm must be Busy and its Renew must not extend
-  the lease. A malformed/oversized owner message must end that lease.
+  the lease. Repeat while the first owner is Prepared: no diagnostic may be
+  queued until that owner arms. A malformed/oversized owner message must end
+  that lease.
 - Verify a different desktop UID cannot connect or control the helper.
 - Inspect the running helper's `Uid`, `CapEff`, `NoNewPrivs`, and `Seccomp` in
   `/proc/PID/status` as administrator. It must be non-root, without capabilities,

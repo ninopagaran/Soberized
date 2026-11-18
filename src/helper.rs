@@ -169,7 +169,9 @@ fn event_loop(
                         Ok(command) => {
                             peer.last_seen = now;
                             let response = schedule.command(peer.id, command, now);
-                            if command == Command::Arm && response.code == ReplyCode::Ok {
+                            if matches!(command, Command::Prepare | Command::Arm)
+                                && response.code == ReplyCode::Ok
+                            {
                                 peer.leased = true;
                             }
                             remove =
@@ -328,10 +330,25 @@ mod tests {
             output.values
         });
         let owner = Client::connect_for_test(&path).unwrap();
+        let prepared = owner.command(Command::Prepare).unwrap();
+        assert_eq!(prepared.state, State::Prepared);
+        assert_eq!(prepared.next_seconds, 0);
+        let other = Client::connect_for_test(&path).unwrap();
+        assert_eq!(other.command(Command::Arm).unwrap().code, ReplyCode::Busy);
+        assert_eq!(
+            other.command(Command::TestInput).unwrap().code,
+            ReplyCode::NotOwner
+        );
+        // A prepared owner must survive the non-owner idle timeout.
+        std::thread::sleep(std::time::Duration::from_millis(CLIENT_IDLE_MS + 100));
+        assert_eq!(
+            owner.command(Command::Renew).unwrap().state,
+            State::Prepared
+        );
+        let other = Client::connect_for_test(&path).unwrap();
         let response = owner.command(Command::Arm).unwrap();
         assert_eq!(response.state, State::Armed);
         assert_eq!(response.next_seconds, 600);
-        let other = Client::connect_for_test(&path).unwrap();
         assert_eq!(other.command(Command::Arm).unwrap().code, ReplyCode::Busy);
         assert_eq!(
             other.command(Command::Renew).unwrap().code,

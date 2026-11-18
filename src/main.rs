@@ -21,7 +21,7 @@ fn run() -> io::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.is_empty() || arguments == ["--help"] || arguments == ["help"] {
         println!(
-            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch                   Launch Sober with session-only controller access, then start\n  start                    Arm input for the current Sober instance\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n  test-input               Queue one brief movement pulse in 10 seconds\n\nPulses can move your avatar. Park in a safe location before starting.\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
+            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch                   Prepare a neutral gamepad, then launch Sober\n  start                    Arm input for the current Sober instance\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n  test-input               Queue one brief movement pulse in 10 seconds\n\nPulses can move your avatar. Park in a safe location before starting.\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
@@ -109,6 +109,7 @@ fn start() -> io::Result<()> {
         ));
     }
     control_service("start")?;
+    wait_for_controller(false)?;
     println!(
         "Session controller started. Pulses briefly move your avatar; use a safe location. Check soberized status to confirm input is armed."
     );
@@ -158,6 +159,14 @@ fn status() -> io::Result<()> {
     let response = Client::connect(Path::new(SOCKET_PATH))?.command(Operation::Status)?;
     match response.state {
         State::Ready => println!("Waiting for a session lease; no pulses scheduled."),
+        State::Prepared => println!(
+            "{}",
+            if session.status.starts_with("Waiting for ") {
+                &session.status
+            } else {
+                "Virtual controller prepared; movement disabled until a Roblox game join."
+            }
+        ),
         State::Armed => println!(
             "Armed (brief movement pulses). Next pulse in {}s; {} pulses sent.\nRoblox: monitoring client disconnects; server connection is unverified.",
             response.next_seconds, response.pulses
@@ -189,7 +198,7 @@ fn test_input() -> io::Result<()> {
         }
         ReplyCode::NotOwner => {
             return Err(io::Error::other(
-                "the helper has no active session; start Soberized before testing input",
+                "movement is not armed; join a Roblox experience and check soberized status before testing input",
             ));
         }
     }
@@ -201,6 +210,62 @@ fn launch() -> io::Result<()> {
     if sober::instance()?.is_some() {
         return Err(io::Error::other(
             "Sober is already running; close it before launching with session-only gamepad permissions, or use start for an already prepared instance",
+        ));
+    }
+    // The worker owns a neutral-only lease before Flatpak starts and
+    // Sober initializes its controller handling. It arms only after a game join.
+    control_service("restart")?;
+    let result = launch_prepared();
+    if result.is_err() {
+        let _ = control_service("stop");
+    }
+    result
+}
+
+fn wait_for_controller(prepared_only: bool) -> io::Result<()> {
+    for _ in 0..50 {
+        if !unit_active(true, USER_UNIT) {
+            return Err(io::Error::other(
+                "session controller stopped during preparation; inspect journalctl --user -u soberized-session.service",
+            ));
+        }
+        let response = Client::connect(Path::new(SOCKET_PATH))?.command(Operation::Status)?;
+        match response.state {
+            State::Prepared => return Ok(()),
+            State::Armed | State::Pulsing if !prepared_only => return Ok(()),
+            State::Armed | State::Pulsing => {
+                return Err(io::Error::other(
+                    "Sober started during controller preparation; close it and retry soberized launch",
+                ));
+            }
+            State::Ready => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    Err(io::Error::other(
+        "virtual controller preparation timed out; inspect the helper and session journals",
+    ))
+}
+
+fn launch_prepared() -> io::Result<()> {
+    wait_for_controller(true)?;
+    // uinput creation and udev's node/seat ACL setup are asynchronous. Do not
+    // launch a client until the desktop user can read the matching event node.
+    let mut accessible = false;
+    for _ in 0..50 {
+        if gamepad_accessible()? {
+            accessible = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if !accessible {
+        return Err(io::Error::other(
+            "the prepared gamepad has no readable event node; inspect udev seat ACLs before retrying",
+        ));
+    }
+    if sober::instance()?.is_some() {
+        return Err(io::Error::other(
+            "Sober started during controller preparation; close it and retry soberized launch",
         ));
     }
     let mut child = Command::new("/usr/bin/flatpak")
@@ -221,22 +286,117 @@ fn launch() -> io::Result<()> {
             )));
         }
         if sober::instance()?.is_some() {
-            return start();
+            println!(
+                "Sober launched with the virtual controller already present. Movement stays disabled until a Roblox game join; check soberized status."
+            );
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(500));
     }
     Err(io::Error::other(
-        "Sober is still starting; run soberized start after its window opens",
+        "Sober startup timed out; the controller was stopped. Close Sober and retry soberized launch",
     ))
+}
+
+fn gamepad_accessible() -> io::Result<bool> {
+    use std::ffi::CString;
+    for entry in std::fs::read_dir("/sys/class/input")? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(number) = name.to_str().and_then(|name| name.strip_prefix("event")) else {
+            continue;
+        };
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        if std::fs::read_to_string(entry.path().join("device/name"))
+            .is_ok_and(|name| name.trim_end() == soberized::device::NAME)
+        {
+            let node = format!("/dev/input/event{number}");
+            if !std::fs::symlink_metadata(&node)
+                .is_ok_and(|metadata| metadata.file_type().is_char_device())
+            {
+                continue;
+            }
+            let node = CString::new(node).expect("fixed prefix and decimal event number");
+            // SAFETY: a valid NUL-terminated path. This checks access without
+            // opening or reading any input device, including physical devices.
+            if unsafe { libc::access(node.as_ptr(), libc::R_OK) } == 0 {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+struct SessionLease {
+    client: Client,
+    last_check: u64,
+    next_renewal: u64,
+}
+
+impl SessionLease {
+    fn prepare() -> io::Result<Self> {
+        let client = Client::connect(Path::new(SOCKET_PATH))?;
+        let response = client.command(Operation::Prepare)?;
+        if response.code != ReplyCode::Ok || response.state != State::Prepared {
+            return Err(io::Error::other(
+                "another controller already owns the input lease",
+            ));
+        }
+        let now = helper::boot_ms()?;
+        Ok(Self {
+            client,
+            last_check: now,
+            next_renewal: now + 10_000,
+        })
+    }
+
+    fn check(&mut self) -> io::Result<u64> {
+        let now = helper::boot_ms()?;
+        if now < self.last_check || now.saturating_sub(self.last_check) > 5_000 {
+            return Err(io::Error::other(
+                "Soberized stopped after suspend, a clock regression, or a scheduling gap; restart explicitly to resume",
+            ));
+        }
+        self.last_check = now;
+        if now >= self.next_renewal {
+            let response = self.client.command(Operation::Renew)?;
+            if response.code != ReplyCode::Ok || response.state == State::Ready {
+                return Err(io::Error::other(
+                    "helper no longer holds this session lease",
+                ));
+            }
+            self.next_renewal = now + 10_000;
+        }
+        Ok(now)
+    }
 }
 
 fn session() -> io::Result<()> {
     installed()?;
-    let target = sober::instance()?.ok_or_else(|| io::Error::other("Sober is not running"))?;
+    let mut lease = SessionLease::prepare()?;
+    let startup_deadline = lease.last_check + 30_000;
+    notify::status("Waiting for Sober startup; virtual controller prepared, movement disabled")?;
+    let target = loop {
+        let now = lease.check()?;
+        if let Some(target) = sober::instance()? {
+            break target;
+        }
+        if now >= startup_deadline {
+            return Err(io::Error::other(
+                "Sober did not start within 30 seconds; the neutral controller was removed",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
     let mut monitor =
         roblox_log::Monitor::attach(roblox_log::default_path()?, sober::started_at(&target)?)?;
-    notify::status("Waiting for a Roblox game join; no movement pulses yet")?;
+    notify::status(
+        "Waiting for a Roblox game join; virtual controller prepared, movement disabled",
+    )?;
     loop {
+        lease.check()?;
         if sober::instance()?.as_ref() != Some(&target) {
             return Ok(());
         }
@@ -254,8 +414,7 @@ fn session() -> io::Result<()> {
             None => std::thread::sleep(Duration::from_secs(2)),
         }
     }
-    let client = Client::connect(Path::new(SOCKET_PATH))?;
-    if client.command(Operation::Arm)?.code != ReplyCode::Ok {
+    if lease.client.command(Operation::Arm)?.code != ReplyCode::Ok {
         return Err(io::Error::other(
             "another controller already owns the input lease",
         ));
@@ -265,20 +424,11 @@ fn session() -> io::Result<()> {
         "Soberized armed for Sober instance {}. Movement pulse: 250 ms at 50% left-stick deflection every 10 minutes; use a safe location and stop before other games.",
         target.id
     );
-    let mut last_check = helper::boot_ms()?;
-    let mut next_renewal = last_check + 10_000;
     let mut transition_since = None;
     loop {
         std::thread::sleep(Duration::from_secs(2));
         let current = sober::instance()?;
-        let now = helper::boot_ms()?;
-        if now.saturating_sub(last_check) > 5_000 {
-            eprintln!(
-                "Soberized stopped after suspend or a scheduling gap. Restart explicitly to resume."
-            );
-            return Ok(());
-        }
-        last_check = now;
+        let now = lease.check()?;
         if current.as_ref() != Some(&target) {
             eprintln!("Sober instance ended or changed; Soberized stopped.");
             return Ok(());
@@ -298,7 +448,8 @@ fn session() -> io::Result<()> {
                 return Ok(());
             }
         } else if let Some(event @ roblox_log::Event::Disconnected { .. }) = monitor.latest() {
-            let pulses = client
+            let pulses = lease
+                .client
                 .command(Operation::Status)
                 .ok()
                 .map(|response| response.pulses);
@@ -314,15 +465,6 @@ fn session() -> io::Result<()> {
             return Err(io::Error::other("Sober log disappeared; input stopped"));
         } else {
             transition_since = None;
-        }
-        if now >= next_renewal {
-            let response = client.command(Operation::Renew)?;
-            if response.code != ReplyCode::Ok || response.state == State::Ready {
-                return Err(io::Error::other(
-                    "helper no longer holds this session lease",
-                ));
-            }
-            next_renewal = now + 10_000;
         }
     }
 }
