@@ -3,7 +3,7 @@ use std::io;
 
 pub const REQUEST_LEN: usize = 8;
 pub const RESPONSE_LEN: usize = 16;
-const MAGIC: [u8; 4] = [b'S', b'B', b'Z', 4];
+const MAGIC: [u8; 4] = [b'S', b'B', b'Z', 5];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -15,6 +15,7 @@ pub enum Command {
     TestInput = 5,
     Prepare = 6,
     UiSelect = 7,
+    Pause = 8,
 }
 
 impl Command {
@@ -37,6 +38,7 @@ impl Command {
             5 => Ok(Self::TestInput),
             6 => Ok(Self::Prepare),
             7 => Ok(Self::UiSelect),
+            8 => Ok(Self::Pause),
             _ => Err(invalid()),
         }
     }
@@ -127,6 +129,7 @@ mod tests {
             Command::TestInput,
             Command::Prepare,
             Command::UiSelect,
+            Command::Pause,
         ] {
             assert_eq!(Command::decode(&command.encode()).unwrap(), command);
         }
@@ -162,8 +165,8 @@ mod tests {
     }
 
     #[test]
-    fn helpers_without_selection_diagnostics_are_not_accepted() {
-        for version in [1, 2, 3] {
+    fn helpers_without_pause_are_not_accepted() {
+        for version in [1, 2, 3, 4] {
             let mut request = Command::Prepare.encode();
             request[3] = version;
             assert!(Command::decode(&request).is_err());

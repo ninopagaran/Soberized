@@ -14,6 +14,7 @@ pulse every ten minutes, returning all controls to neutral afterward.
 - Virtual controller input without modifying Roblox or Sober binaries.
 - Optional Gamescope mode for background focus compatibility.
 - Opt-in mouse capture for camera control inside Gamescope.
+- Opt-in reconnect by recognizing and clicking Roblox's disconnect dialog.
 - Automatic input shutdown on disconnect, Sober exit, lease expiry, or suspend.
 - CLI controls, diagnostics, pulse records, and optional Sway shortcuts.
 
@@ -28,6 +29,8 @@ soberized launch --gamescope
 
 Add `--capture-mouse` to enable camera mouse capture when launching. It can confine
 the cursor inside Gamescope; use your Sway workspace shortcut to leave the window.
+Add `--auto-reconnect` for experimental dialog recovery; see the
+[reconnect guide](docs/RECONNECT.md) for requirements and validation.
 
 Manage the input session with:
 
@@ -54,6 +57,7 @@ Flatpak overrides. See the [security model](SECURITY.md) for boundaries and limi
 - [Installation, updates, and troubleshooting](docs/INSTALLATION.md)
 - [Gamescope setup and mouse capture](docs/GAMESCOPE.md)
 - [UI navigation diagnostic](docs/UI_NAVIGATION.md)
+- [Automatic reconnect](docs/RECONNECT.md)
 - [Compatibility checks and validation results](docs/VALIDATION.md)
 - [Security design](SECURITY.md)
 

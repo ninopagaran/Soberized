@@ -11,6 +11,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+mod gamescope_input;
+mod reconnect;
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("soberized: {error}");
@@ -22,7 +25,7 @@ fn run() -> io::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.is_empty() || arguments == ["--help"] || arguments == ["help"] {
         println!(
-            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch [--gamescope]      Prepare a gamepad, then launch Sober (optional nested display)\n    --capture-mouse        With --gamescope: opt into camera mouse capture\n  start                    Arm input for the current Sober instance\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n  test-input               Queue one brief movement pulse in 10 seconds\n  test-ui-navigation       Test one gamepad Select press without confirming a button\n\nPulses can move your avatar. Park in a safe location before starting.\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
+            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch [--gamescope]      Prepare a gamepad, then launch Sober (optional nested display)\n    --capture-mouse        With --gamescope: opt into camera mouse capture\n  start [--auto-reconnect] Arm input; optionally recover recognized disconnects\n    --auto-reconnect       With Gamescope: recognize and click Reconnect on eligible errors\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n  test-input               Queue one brief movement pulse in 10 seconds\n  test-ui-navigation       Test one gamepad Select press without confirming a button\n  check-reconnect          Check Gamescope input and dialog OCR without sending input\n  test-reconnect           Try one recognized Reconnect click after a disconnect\n\nPulses can move your avatar. Park in a safe location before starting.\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
@@ -44,22 +47,52 @@ fn run() -> io::Result<()> {
         .first()
         .is_some_and(|argument| argument == "launch")
     {
-        return launch(LaunchMode::parse(&arguments[1..])?);
+        let (options, auto_reconnect) = reconnect_option(&arguments[1..])?;
+        return launch(LaunchMode::parse(&options)?, auto_reconnect);
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "start")
+    {
+        let (options, auto_reconnect) = reconnect_option(&arguments[1..])?;
+        if !options.is_empty() {
+            return Err(io::Error::other(
+                "usage: soberized start [--auto-reconnect]",
+            ));
+        }
+        return start(auto_reconnect);
     }
     if arguments.len() != 1 {
         return Err(io::Error::other("unknown arguments; use soberized --help"));
     }
     match arguments[0].as_str() {
-        "start" => start(),
         "stop" => stop(),
         "toggle" if unit_active(true, USER_UNIT) => stop(),
-        "toggle" => start(),
+        "toggle" => start(false),
         "status" => status(),
         "test-input" => test_input(),
         "test-ui-navigation" => test_ui_navigation(),
+        "test-reconnect" => test_reconnect(),
+        "check-reconnect" => check_reconnect(),
         "session" => session(), // Invoked by the root-owned systemd user unit.
         _ => Err(io::Error::other("unknown command; use soberized --help")),
     }
+}
+
+fn reconnect_option(options: &[String]) -> io::Result<(Vec<String>, bool)> {
+    let mut filtered = Vec::new();
+    let mut enabled = false;
+    for option in options {
+        if option == "--auto-reconnect" {
+            if enabled {
+                return Err(io::Error::other("duplicate --auto-reconnect option"));
+            }
+            enabled = true;
+        } else {
+            filtered.push(option.clone());
+        }
+    }
+    Ok((filtered, enabled))
 }
 
 fn unit_active(user: bool, unit: &str) -> bool {
@@ -108,15 +141,26 @@ fn installed() -> io::Result<()> {
     Ok(())
 }
 
-fn start() -> io::Result<()> {
+fn start(auto_reconnect: bool) -> io::Result<()> {
     installed()?;
-    if sober::instance()?.is_none() {
+    let target = sober::instance()?
+        .ok_or_else(|| io::Error::other("Sober is not running; use soberized launch"))?;
+    if auto_reconnect {
+        reconnect::dependencies()?;
+        gamescope_input::Endpoint::locate(&target)?;
+    }
+    if unit_active(true, USER_UNIT) && reconnect::enabled()? != auto_reconnect {
         return Err(io::Error::other(
-            "Sober is not running; use soberized launch",
+            "run soberized stop before changing auto-reconnect mode",
         ));
     }
-    control_service("start")?;
-    wait_for_controller(false)?;
+    reconnect::set_enabled(auto_reconnect)?;
+    let result = control_service("start").and_then(|()| wait_for_controller(false));
+    if let Err(error) = result {
+        let _ = control_service("stop");
+        let _ = reconnect::set_enabled(false);
+        return Err(error);
+    }
     println!(
         "Session controller started. Pulses briefly move your avatar; use a safe location. Check soberized status to confirm input is armed."
     );
@@ -124,13 +168,16 @@ fn start() -> io::Result<()> {
 }
 
 fn stop() -> io::Result<()> {
-    control_service("stop")?;
+    let preference = reconnect::set_enabled(false);
+    let service = control_service("stop");
     if unit_active(false, HELPER_UNIT) {
         // The worker usually closes its lease first. Tolerate that cleanup race.
         if let Ok(client) = Client::connect(Path::new(SOCKET_PATH)) {
             let _ = client.command(Operation::Stop);
         }
     }
+    service?;
+    preference?;
     println!("Stopped.");
     Ok(())
 }
@@ -140,6 +187,9 @@ fn status() -> io::Result<()> {
     installed()?;
     let session = units::query(true, USER_UNIT)?;
     let controller = unit_active(true, USER_UNIT);
+    if controller && reconnect::enabled()? {
+        println!("Auto-reconnect: enabled (Gamescope dialog recognition; up to three attempts).");
+    }
     let response = if unit_active(false, HELPER_UNIT) {
         Some(Client::connect(Path::new(SOCKET_PATH))?.command(Operation::Status)?)
     } else {
@@ -178,7 +228,9 @@ fn status() -> io::Result<()> {
             "{}",
             if !controller {
                 "Neutral diagnostic controller present; movement is disabled."
-            } else if session.status.starts_with("Waiting for ") {
+            } else if session.status.starts_with("Waiting for ")
+                || session.status.starts_with("Reconnecting:")
+            {
                 &session.status
             } else {
                 "Virtual controller prepared; movement disabled until a Roblox game join."
@@ -226,9 +278,15 @@ fn test_input() -> io::Result<()> {
     Ok(())
 }
 
-fn launch(mode: LaunchMode) -> io::Result<()> {
+fn launch(mode: LaunchMode, auto_reconnect: bool) -> io::Result<()> {
     // Check optional dependencies before activating or replacing any lease.
     mode.check_requirements()?;
+    if auto_reconnect {
+        if !mode.uses_gamescope() {
+            return Err(io::Error::other("--auto-reconnect requires --gamescope"));
+        }
+        reconnect::dependencies()?;
+    }
     installed()?;
     if sober::instance()?.is_some() {
         return Err(io::Error::other(
@@ -237,10 +295,11 @@ fn launch(mode: LaunchMode) -> io::Result<()> {
     }
     // The worker owns a neutral-only lease before Flatpak starts and
     // Sober initializes its controller handling. It arms only after a game join.
-    control_service("restart")?;
-    let result = launch_prepared(mode);
+    reconnect::set_enabled(auto_reconnect)?;
+    let result = control_service("restart").and_then(|()| launch_prepared(mode));
     if result.is_err() {
         let _ = control_service("stop");
+        let _ = reconnect::set_enabled(false);
     }
     result
 }
@@ -446,6 +505,13 @@ struct SessionLease {
 }
 
 impl SessionLease {
+    fn pause(&self) -> io::Result<()> {
+        let response = self.client.command(Operation::Pause)?;
+        if response.code != ReplyCode::Ok || response.state != State::Prepared {
+            return Err(io::Error::other("could not pause movement for recovery"));
+        }
+        Ok(())
+    }
     fn prepare() -> io::Result<Self> {
         let client = Client::connect(Path::new(SOCKET_PATH))?;
         let response = client.command(Operation::Prepare)?;
@@ -483,6 +549,195 @@ impl SessionLease {
     }
 }
 
+fn recovery_observe(
+    lease: &mut SessionLease,
+    target: &sober::Instance,
+    monitor: &mut roblox_log::Monitor,
+    baseline: (u64, u64),
+    test: bool,
+) -> io::Result<bool> {
+    lease.check()?;
+    if !test && !reconnect::enabled()? {
+        return Err(io::Error::other("auto-reconnect was disabled"));
+    }
+    if sober::instance()?.as_ref() != Some(target) {
+        return Err(io::Error::other(
+            "Sober instance ended or changed; recovery cancelled",
+        ));
+    }
+    monitor.poll()?;
+    Ok(reconnect::observe(
+        monitor.latest(),
+        monitor.connected(),
+        monitor.connection_revision(),
+        monitor.generation(),
+        baseline,
+    )? == reconnect::Observation::Reconnected)
+}
+
+fn recover(
+    lease: &mut SessionLease,
+    target: &sober::Instance,
+    monitor: &mut roblox_log::Monitor,
+    retries: &mut reconnect::RetryBudget,
+    test: bool,
+) -> io::Result<()> {
+    let result = (|| {
+        lease.pause()?;
+        reconnect::dependencies()?;
+        let endpoint = gamescope_input::Endpoint::locate(target)?;
+        let baseline = (monitor.connection_revision(), monitor.generation());
+        loop {
+            let backoff = retries.next_delay()?;
+            let delay = if test { 10_000 } else { backoff };
+            let message = format!(
+                "Reconnecting: attempt {}/3 in {}s; movement paused, waiting for a matching dialog",
+                retries.attempt(),
+                delay / 1_000
+            );
+            notify::status(&message)?;
+            eprintln!("{message}");
+            let due = lease.check()? + delay;
+            while lease.check()? < due {
+                if recovery_observe(lease, target, monitor, baseline, test)? {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            if recovery_observe(lease, target, monitor, baseline, test)? {
+                return Ok(());
+            }
+            let code = match monitor.latest() {
+                Some(roblox_log::Event::Disconnected { code, .. }) => *code,
+                _ => {
+                    return Err(io::Error::other(
+                        "a game join is already in progress; no click sent",
+                    ));
+                }
+            };
+            endpoint.verify(target)?;
+            let first = reconnect::find_button(&endpoint, code)?;
+            if recovery_observe(lease, target, monitor, baseline, test)? {
+                return Ok(());
+            }
+            let second = reconnect::find_button(&endpoint, code)?;
+            if first != second {
+                return Err(io::Error::other(
+                    "disconnect dialog changed between captures; no click sent",
+                ));
+            }
+            if recovery_observe(lease, target, monitor, baseline, test)? {
+                return Ok(());
+            }
+            if !matches!(monitor.latest(), Some(roblox_log::Event::Disconnected { code: current, .. }) if *current == code)
+            {
+                return Err(io::Error::other("disconnect state changed; no click sent"));
+            }
+            endpoint.verify(target)?;
+            let mut pointer = endpoint.pointer()?;
+            if recovery_observe(lease, target, monitor, baseline, test)? {
+                return Ok(());
+            }
+            if !matches!(monitor.latest(), Some(roblox_log::Event::Disconnected { code: current, .. }) if *current == code)
+            {
+                return Err(io::Error::other("disconnect state changed; no click sent"));
+            }
+            let (x, y) = second.center();
+            pointer.click(x, y)?;
+            drop(pointer);
+            eprintln!(
+                "Reconnect click sent to the bound Gamescope instance; attempt={} code={code}",
+                retries.attempt()
+            );
+            notify::status(
+                "Reconnecting: click sent; waiting for a fresh client connection marker, movement paused",
+            )?;
+            let deadline = lease.check()? + reconnect::JOIN_WAIT_MS;
+            while lease.check()? < deadline {
+                if recovery_observe(lease, target, monitor, baseline, test)? {
+                    eprintln!("A fresh client connection marker was observed after recovery.");
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            if test {
+                return Err(io::Error::other(
+                    "no fresh connection marker within 90 seconds; diagnostic ended",
+                ));
+            }
+        }
+    })();
+    if let Err(error) = &result {
+        let _ = notify::status(&format!("Auto-reconnect stopped: {error}. Input disabled."));
+    }
+    result
+}
+
+fn test_reconnect() -> io::Result<()> {
+    installed()?;
+    reconnect::dependencies()?;
+    if unit_active(true, USER_UNIT) {
+        return Err(io::Error::other(
+            "run soberized stop before testing reconnect",
+        ));
+    }
+    let target = sober::instance()?.ok_or_else(|| io::Error::other("Sober is not running"))?;
+    let mut monitor =
+        roblox_log::Monitor::attach(roblox_log::default_path()?, sober::started_at(&target)?)?;
+    if !matches!(monitor.latest(), Some(roblox_log::Event::Disconnected { code, .. }) if reconnect::recoverable(*code))
+    {
+        return Err(io::Error::other(
+            "no eligible disconnect is currently logged; no click sent",
+        ));
+    }
+    gamescope_input::Endpoint::locate(&target)?;
+    let mut lease = SessionLease::prepare()?;
+    println!(
+        "Reconnect diagnostic: in ten seconds, recognize the matching dialog and send at most one click inside Gamescope. Ctrl+C or soberized stop cancels."
+    );
+    recover(
+        &mut lease,
+        &target,
+        &mut monitor,
+        &mut reconnect::RetryBudget::default(),
+        true,
+    )?;
+    println!(
+        "A fresh client connection marker was observed. Anti-idle movement stays disabled until soberized start."
+    );
+    Ok(())
+}
+
+fn check_reconnect() -> io::Result<()> {
+    reconnect::dependencies()?;
+    let target = sober::instance()?.ok_or_else(|| io::Error::other("Sober is not running"))?;
+    let endpoint = gamescope_input::Endpoint::locate(&target)?;
+    let _pointer = endpoint.pointer()?;
+    println!("Bound Gamescope input handshake passed. No input sent.");
+    let monitor =
+        roblox_log::Monitor::attach(roblox_log::default_path()?, sober::started_at(&target)?)?;
+    if let Some(roblox_log::Event::Disconnected { code, .. }) = monitor.latest() {
+        if reconnect::recoverable(*code) {
+            let button = reconnect::find_button(&endpoint, *code)?;
+            let (x, y) = button.center();
+            println!(
+                "Matching disconnect dialog recognized (code {code}); Reconnect at {x},{y}. No click sent."
+            );
+            return Ok(());
+        }
+    }
+    match reconnect::find_button(&endpoint, 277) {
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            println!("Screenshot/OCR completed; no matching disconnect dialog. No input sent.")
+        }
+        Ok(_) => println!(
+            "A dialog is visible without an eligible disconnect log; input remains disabled."
+        ),
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
 fn session() -> io::Result<()> {
     installed()?;
     eprintln!(
@@ -490,6 +745,8 @@ fn session() -> io::Result<()> {
         env!("CARGO_PKG_VERSION")
     );
     let mut lease = SessionLease::prepare()?;
+    let auto_reconnect = reconnect::enabled()?;
+    let mut retries = reconnect::RetryBudget::default();
     let startup_deadline = lease.last_check + 30_000;
     notify::status("Waiting for Sober startup; virtual controller prepared, movement disabled")?;
     let target = loop {
@@ -520,6 +777,12 @@ fn session() -> io::Result<()> {
                 std::thread::sleep(Duration::from_secs(2))
             }
             Some(event @ roblox_log::Event::Disconnected { .. }) => {
+                if auto_reconnect
+                    && matches!(event, roblox_log::Event::Disconnected { code, .. } if reconnect::recoverable(*code))
+                {
+                    recover(&mut lease, &target, &mut monitor, &mut retries, false)?;
+                    break;
+                }
                 let message = event.disconnect_message(None).unwrap();
                 notify::status(&message)?;
                 return Err(io::Error::other(message));
@@ -548,6 +811,7 @@ fn session() -> io::Result<()> {
             return Ok(());
         }
         monitor.poll()?;
+        retries.observe(now, monitor.connected());
         if matches!(
             monitor.latest(),
             Some(roblox_log::Event::Disconnected { code: 285, .. })
@@ -562,6 +826,19 @@ fn session() -> io::Result<()> {
                 return Ok(());
             }
         } else if let Some(event @ roblox_log::Event::Disconnected { .. }) = monitor.latest() {
+            if auto_reconnect
+                && matches!(event, roblox_log::Event::Disconnected { code, .. } if reconnect::recoverable(*code))
+            {
+                recover(&mut lease, &target, &mut monitor, &mut retries, false)?;
+                if lease.client.command(Operation::Arm)?.code != ReplyCode::Ok {
+                    return Err(io::Error::other("could not rearm after reconnect"));
+                }
+                notify::status(
+                    "Movement pulses resumed after a fresh client connection marker; auto-reconnect enabled",
+                )?;
+                transition_since = None;
+                continue;
+            }
             let pulses = lease
                 .client
                 .command(Operation::Status)
@@ -569,8 +846,7 @@ fn session() -> io::Result<()> {
                 .map(|response| response.pulses);
             let message = event.disconnect_message(pulses).unwrap();
             notify::status(&message)?;
-            // Dropping this owner connection removes the gamepad. Do not
-            // navigate/rejoin automatically or continue reporting input active.
+            // Default and ineligible disconnects still drop the owner lease.
             return Err(io::Error::other(message));
         } else if monitor.latest().is_none() {
             notify::status(

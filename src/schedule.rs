@@ -73,6 +73,7 @@ pub struct Schedule {
     select_due: Option<u64>,
     select_end: Option<u64>,
     selection_used: bool,
+    neutral_pending: bool,
 }
 
 impl Schedule {
@@ -92,6 +93,7 @@ impl Schedule {
             select_due: None,
             select_end: None,
             selection_used: false,
+            neutral_pending: false,
         }
     }
 
@@ -128,6 +130,18 @@ impl Schedule {
                 ReplyCode::Ok
             }
             Command::Status => ReplyCode::Ok,
+            Command::Pause if self.owner != Some(client) || self.stop_reason.is_some() => {
+                ReplyCode::NotOwner
+            }
+            Command::Pause => {
+                self.armed = false;
+                self.pulse_end = None;
+                self.test_due = None;
+                self.select_due = None;
+                self.select_end = None;
+                self.neutral_pending = true;
+                ReplyCode::Ok
+            }
             Command::UiSelect
                 if self.owner != Some(client) || self.armed || self.stop_reason.is_some() =>
             {
@@ -191,6 +205,10 @@ impl Schedule {
         }
         if let Some(reason) = self.stop_reason {
             return Effect::Exit(reason);
+        }
+        if self.neutral_pending {
+            self.neutral_pending = false;
+            return Effect::Neutral;
         }
         if let Some(end) = self.select_end {
             if now >= end {
@@ -265,6 +283,54 @@ impl Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn owner_pause_neutralizes_input_preserves_the_device_and_rearms_on_a_new_interval() {
+        let mut schedule = Schedule::new(0);
+        schedule.command(1, Command::Arm, 0);
+        schedule.command(2, Command::TestInput, 0);
+        assert_eq!(
+            advance(&mut schedule, 0, TEST_DELAY_MS),
+            Effect::Pulse(AMPLITUDE, PulseKind::Test)
+        );
+        assert_eq!(
+            schedule.command(2, Command::Pause, TEST_DELAY_MS).code,
+            ReplyCode::NotOwner
+        );
+        let response = schedule.command(1, Command::Pause, TEST_DELAY_MS + 1);
+        assert_eq!(response.state, State::Prepared);
+        assert_eq!(response.pulses, 1);
+        assert_eq!(schedule.tick(TEST_DELAY_MS + 1), Effect::Neutral);
+        assert_eq!(
+            advance(&mut schedule, TEST_DELAY_MS + 250, INTERVAL_MS * 2),
+            Effect::None
+        );
+        let armed = schedule.command(1, Command::Arm, INTERVAL_MS * 2);
+        assert_eq!(armed.next_seconds, 600);
+        assert_eq!(
+            advance(&mut schedule, INTERVAL_MS * 2, INTERVAL_MS * 3),
+            Effect::Pulse(-AMPLITUDE, PulseKind::Scheduled)
+        );
+    }
+
+    #[test]
+    fn pause_cancels_queued_diagnostics_without_renewing_the_lease() {
+        let mut schedule = Schedule::new(0);
+        schedule.command(1, Command::Prepare, 0);
+        schedule.command(1, Command::UiSelect, 0);
+        schedule.command(1, Command::Pause, 1);
+        assert_eq!(schedule.tick(1), Effect::Neutral);
+        for now in (50..LEASE_MS).step_by(50) {
+            assert_eq!(schedule.tick(now), Effect::None);
+        }
+        assert_eq!(
+            schedule.tick(LEASE_MS),
+            Effect::Exit(StopReason::LeaseExpired)
+        );
+        assert_eq!(
+            schedule.command(1, Command::Pause, LEASE_MS).code,
+            ReplyCode::NotOwner
+        );
+    }
 
     #[test]
     fn selection_probe_is_owner_only_delayed_and_never_arms_movement() {

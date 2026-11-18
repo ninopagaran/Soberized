@@ -69,8 +69,8 @@ commands, truncated/oversized packets, and unexpected fields close the client.
 `MSG_TRUNC` detects a valid-looking prefix with extra data. `recvmsg/sendmsg` are
 not allowed; no descriptor exchange is part of the protocol.
 
-Only Prepare, Arm, Renew, Stop, Status, and fixed TestInput/UiSelect diagnostics
-exist. Protocol version 4 rejects helpers without the selection-only diagnostic.
+Only Prepare, Arm, Pause, Renew, Stop, Status, and fixed TestInput/UiSelect
+diagnostics exist. Protocol version 5 rejects helpers without owner-only Pause.
 Prepare acquires the same single-owner, 30-second lease as Arm but permits no
 scheduled or diagnostic movement pulses. Its owner may request one selection-only
 diagnostic as described below.
@@ -80,6 +80,11 @@ another client cannot renew or replace it. Authorized clients may stop it. The
 helper permits at most eight clients, bounded acceptance work, a five-second
 unowned startup window, and five-second idle non-owner connections. Systemd also
 limits CPU, memory, tasks, descriptors, and activation frequency.
+
+Pause cancels queued/active input, requests a full neutral reset, and returns the
+same owner to Prepared without destroying its device or renewing its lease.
+Only that owner can pause or rearm it. Rearming starts a new ten-minute interval;
+pulse counts and diagnostic limits are retained.
 
 Pulse parameters are fixed: 600 seconds between scheduled starts, left-stick X
 amplitude 16384, 250 ms duration, alternating direction, full neutral reset. No
@@ -117,14 +122,20 @@ check; it does not open or read physical input devices, change permissions, or
 change the helper's syscall filter. Launch errors stop the session worker.
 
 The unprivileged session controller observes joins and disconnects in Sober's
-engine log. It waits for a join before arming and drops its lease on an observed
-disconnect. Logs are untrusted: only fixed engine header/category patterns are
+engine log. It waits for a join before arming and normally drops its lease on an
+observed disconnect. Opt-in recovery retains a neutral, leased controller as
+described below. Logs are untrusted: only fixed engine header/category patterns are
 parsed, lines and per-poll reads are bounded, and no log content is executed.
 Only a validated timestamp and numeric reason are retained in status. The helper
 does not read these logs. Missing logs cause waiting; read failures stop the
 session. Game connection state cannot be proven by this heuristic. The initial
 snapshot is limited to the last 8 MiB, with subsequent reads limited to 256 KiB
 per poll and individual lines limited to 8 KiB.
+
+Recovery also tracks a boolean and counter for a validated client network
+category after a join. The server address payload is discarded. A fresh marker
+is required before recovery can rearm movement; log rotation/truncation during
+recovery aborts it to prevent a replayed snapshot satisfying that check.
 
 Each successful output and neutral reset is journaled with its pulse count,
 source, and boottime, and shutdown records its cause. The user controller reports
@@ -164,6 +175,47 @@ timing, and lease rules are unchanged. The virtual controller remains visible
 to other applications with normal device access; a nested compositor does not
 turn it into Sober-only input. Background acceptance and idle-timer reset must
 still be measured independently. See [Gamescope validation](docs/GAMESCOPE.md).
+
+## Optional automatic reconnect
+
+The user-session frontend can opt into recognizing a disconnect dialog and
+clicking its Reconnect label. Its libei code is compiled into the frontend only;
+the helper acquires no pointer capabilities, extra FFI library, or new syscalls.
+The user worker retains its AF_UNIX-only address-family restriction.
+
+The frontend walks the bound Flatpak wrapper's process ancestry and accepts only
+a same-UID Gamescope ancestor's named input socket, authenticated by SO_PEERCRED.
+It checks the compositor socket's peer credentials before invoking the fixed
+gamescopectl screenshot command. It never uses a global input device, arbitrary
+socket argument, desktop remote-control portal, or shell command. A malicious
+process already running under the desktop UID remains outside this protection:
+it can access that user's compositor sockets and files independently.
+
+Only codes 266, 277, and 278 are eligible. The helper is paused before inspection.
+Two private captures must identify the same unique English Reconnect label,
+beside Leave and below Disconnected, with the matching error code. OCR confidence,
+bounds, output size, subprocess timeouts, and image dimensions are checked. The
+input sender requests absolute pointer/button capabilities and sends only a
+bounded left click at the detected label. Client instance, disconnect reason,
+log generation, and Gamescope ancestry are checked again before the click.
+The retries are limited to three, with increasing delays. Input stops on
+recognition failure, incompatible UI, client loss, or cancellation.
+
+These are heuristic safeguards. A matching log/dialog does not prove that a
+server is live or the screen is authentic, and a UI change between checking and
+clicking cannot be eliminated. No account or private-server data is read to
+rejoin. Roblox's own button decides where to reconnect.
+
+Captured images and OCR files are created in a 0700 temporary directory under
+the user's runtime directory and removed on normal completion/error. Abrupt
+termination can leave those private files until runtime-directory cleanup.
+Screenshots and OCR text are never journaled or sent over the network. The
+runtime opt-in file is fixed-format, owner-only, read without following symlinks,
+and cleared by the stop command. It is not a shell or environment file.
+
+See [reconnect setup and validation](docs/RECONNECT.md). The read-only handshake
+and real-client capture/OCR negative test passed on the target host. Live dialog
+recognition, click delivery, and unattended reconnect are still pending.
 
 ## Review and release checks
 

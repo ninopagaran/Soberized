@@ -4,14 +4,14 @@
 
 - Linux x86-64, with Arch Linux/Sway as the initial target.
 - Rust stable 1.85 or later, including rustfmt and Clippy.
-- `libevdev`, `libseccomp`, Flatpak 1.15.6+, and systemd 253+.
+- `libevdev`, `libseccomp`, `libei`, Flatpak 1.15.6+, and systemd 253+.
 - Sober installed as `org.vinegarhq.Sober`.
 - Gamescope and a working host Vulkan driver for the optional nested display.
 
 On Arch, install the build dependencies:
 
 ```sh
-sudo pacman -S --needed rustup libevdev libseccomp
+sudo pacman -S --needed rustup libevdev libseccomp libei
 rustup toolchain install stable --profile minimal --component rustfmt,clippy
 ```
 
@@ -39,7 +39,7 @@ cargo build --release --locked --offline
 ```
 
 Rust dependencies are pinned in `Cargo.lock`. Native bindings use the system's
-libevdev and libseccomp. Review dependencies, service files, and the installer
+libevdev, libseccomp, and libei. Review dependencies, service files, and the installer
 before installation. Builds and downloads run without administrator privileges.
 
 ## Install

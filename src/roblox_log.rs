@@ -111,6 +111,9 @@ pub struct Monitor {
     partial: Vec<u8>,
     discard_line: bool,
     latest: Option<Event>,
+    connected: bool,
+    connection_revision: u64,
+    generation: u64,
 }
 
 impl Monitor {
@@ -123,6 +126,9 @@ impl Monitor {
             partial: Vec::with_capacity(MAX_LINE),
             discard_line: false,
             latest: None,
+            connected: false,
+            connection_revision: 0,
+            generation: 0,
         };
         monitor.poll_budget(SNAPSHOT_BYTES as usize)?;
         Ok(monitor)
@@ -130,6 +136,19 @@ impl Monitor {
 
     pub fn latest(&self) -> Option<&Event> {
         self.latest.as_ref()
+    }
+
+    /// A client network marker, not proof of a live server or successful load.
+    pub fn connection_revision(&self) -> u64 {
+        self.connection_revision
+    }
+
+    pub fn connected(&self) -> bool {
+        self.connected
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn poll(&mut self) -> io::Result<()> {
@@ -143,6 +162,7 @@ impl Monitor {
                 self.file = None;
                 self.identity = None;
                 self.latest = None;
+                self.connected = false;
                 self.partial.clear();
                 self.discard_line = false;
                 return Ok(());
@@ -158,12 +178,14 @@ impl Monitor {
             None => 0,
         };
         if self.identity != Some(identity) || metadata.len() < position {
+            self.generation = self.generation.wrapping_add(1);
             // A newly launched Sober initially still has the previous app's
             // latest.log. Wait for a file modified by this process lifetime.
             if metadata.modified()? < self.not_before {
                 self.file = None;
                 self.identity = None;
                 self.latest = None;
+                self.connected = false;
                 self.partial.clear();
                 self.discard_line = false;
                 return Ok(());
@@ -181,6 +203,7 @@ impl Monitor {
             file.seek(SeekFrom::Start(start))?;
             self.file = Some(file);
             self.latest = None;
+            self.connected = false;
             self.partial.clear();
             self.discard_line = start > 0;
         }
@@ -200,6 +223,24 @@ impl Monitor {
                 if byte == b'\n' {
                     if !self.discard_line {
                         if let Ok(line) = std::str::from_utf8(&self.partial) {
+                            // Only accept the exact network category after a
+                            // validated engine header; retain no address data.
+                            if let Some((header, _)) =
+                                line.split_once(",7 [FLog::Network] serverId: ")
+                            {
+                                let synthetic = format!(
+                                    "{header},7 [FLog::Network] Sending disconnect with reason: 285"
+                                );
+                                if matches!(
+                                    parse_event(&synthetic),
+                                    Some(Event::Disconnected { .. })
+                                ) && matches!(self.latest, Some(Event::Joined { .. }))
+                                {
+                                    self.connected = true;
+                                    self.connection_revision =
+                                        self.connection_revision.wrapping_add(1);
+                                }
+                            }
                             if let Some(event) = parse_event(line) {
                                 // Generic cleanup follows explicit idle/network
                                 // errors; preserve that cause until a new join.
@@ -208,6 +249,7 @@ impl Monitor {
                                 let has_error = matches!(self.latest.as_ref(),Some(Event::Disconnected{code,..}) if *code!=285);
                                 if !cleanup || !has_error {
                                     self.latest = Some(event);
+                                    self.connected = false;
                                 }
                             }
                         }
@@ -237,6 +279,34 @@ pub fn default_path() -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_fresh_network_marker_is_required_after_a_new_join_and_log_rotation_changes_generation() {
+        let temp = Temp::new();
+        let marker =
+            "info: Roblox: 2026-11-18T00:26:55Z,1,abcd,7 [FLog::Network] serverId: <redacted>\n";
+        std::fs::write(temp.path(), format!("{JOIN}{marker}")).unwrap();
+        let mut monitor = Monitor::attach(temp.path(), SystemTime::UNIX_EPOCH).unwrap();
+        assert!(monitor.connected());
+        let baseline = monitor.connection_revision();
+        let generation = monitor.generation();
+        let mut file = OpenOptions::new().append(true).open(temp.path()).unwrap();
+        file.write_all(format!("{IDLE}{JOIN}").as_bytes()).unwrap();
+        monitor.poll().unwrap();
+        assert!(!monitor.connected());
+        assert_eq!(monitor.connection_revision(), baseline);
+        file.write_all(b"info: Roblox: 2026-11-18T00:26:55Z,1,abcd,6 [FLog::Output] ,7 [FLog::Network] serverId: <redacted>\n").unwrap();
+        monitor.poll().unwrap();
+        assert!(!monitor.connected());
+        file.write_all(marker.as_bytes()).unwrap();
+        monitor.poll().unwrap();
+        assert!(monitor.connected());
+        assert!(monitor.connection_revision() > baseline);
+        let next = temp.0.join("next.log");
+        std::fs::write(&next, format!("{JOIN}{marker}")).unwrap();
+        std::fs::rename(next, temp.path()).unwrap();
+        monitor.poll().unwrap();
+        assert_ne!(monitor.generation(), generation);
+    }
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     const JOIN: &str = "info: Roblox: 2026-11-18T00:26:54.021Z,26287.021484,cc0dc6c0,6 [FLog::Output] ! Joining game 'redacted' place 1 at redacted\n";
