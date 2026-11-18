@@ -69,15 +69,22 @@ commands, truncated/oversized packets, and unexpected fields close the client.
 `MSG_TRUNC` detects a valid-looking prefix with extra data. `recvmsg/sendmsg` are
 not allowed; no descriptor exchange is part of the protocol.
 
-Only Arm, Renew, Stop, and Status exist. A single connection owns the lease;
+Only Arm, Renew, Stop, Status, and a fixed TestInput diagnostic exist. Protocol
+version 2 rejects the old camera-only helper. A single connection owns the lease;
 another client cannot renew or replace it. Authorized clients may stop it. The
 helper permits at most eight clients, bounded acceptance work, a five-second
 unarmed startup window, and five-second idle non-owner connections. Systemd also
 limits CPU, memory, tasks, descriptors, and activation frequency.
 
-Pulse parameters are fixed: 600 seconds between starts, right-stick X amplitude
-8192, 250 ms duration, alternating direction, full neutral reset. No initial
-pulse occurs on arm, so repeated activation cannot request immediate pulses.
+Pulse parameters are fixed: 600 seconds between scheduled starts, left-stick X
+amplitude 16384, 250 ms duration, alternating direction, full neutral reset. No
+initial pulse occurs on arm. An authorized diagnostic request queues this same
+pulse after ten seconds, requires a live owner lease, and has a one-minute
+cooldown during the helper lifetime. It cannot renew that lease or provide raw
+events, axes, amplitudes, durations, or arbitrary timing. A queued diagnostic
+replaces the next scheduled pulse so the two do not collide. A local attacker
+with the desktop UID can stop/restart the helper, resetting its diagnostic
+cooldown; no cross-restart rate-limit guarantee is made.
 The normal 50 ms event-loop polling can add scheduling latency; this is not a
 hard real-time system. An exploited helper could write arbitrary events within
 its fixed gamepad capabilities; fixed application timing is not a security
@@ -87,6 +94,22 @@ Leases last 30 seconds and renew every 10 seconds. Both helper and controller us
 `CLOCK_BOOTTIME`, including suspended time. Gaps above five seconds terminate the
 session, and expired leases are checked before renewal. No catch-up is attempted.
 The controller binds to one Flatpak instance ID/PID and stops on loss/change.
+
+The unprivileged session controller observes joins and disconnects in Sober's
+engine log. It waits for a join before arming and drops its lease on an observed
+disconnect. Logs are untrusted: only fixed engine header/category patterns are
+parsed, lines and per-poll reads are bounded, and no log content is executed.
+Only a validated timestamp and numeric reason are retained in status. The helper
+does not read these logs. Missing logs cause waiting; read failures stop the
+session. Game connection state cannot be proven by this heuristic. The initial
+snapshot is limited to the last 8 MiB, with subsequent reads limited to 256 KiB
+per poll and individual lines limited to 8 KiB.
+
+Each successful output and neutral reset is journaled with its pulse count,
+source, and boottime, and shutdown records its cause. The user controller reports
+disconnect details using systemd StatusText, with notification field injection
+rejected. No account IDs, server addresses, tickets, or full game log lines are
+copied to the journal or status.
 
 ## Review and release checks
 

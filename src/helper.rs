@@ -87,10 +87,33 @@ struct Peer {
 fn apply_tick(schedule: &mut Schedule, output: &mut impl Output, now: u64) -> io::Result<bool> {
     match schedule.tick(now) {
         Effect::None => {}
-        Effect::Pulse(amplitude) => output.pulse(amplitude)?,
-        Effect::Neutral => output.neutral()?,
-        Effect::Exit => {
+        Effect::Pulse(amplitude, kind) => {
+            output.pulse(amplitude)?;
+            eprintln!(
+                "Soberized pulse={} phase=deflect source={} axis=ABS_X value={} duration_ms={} boottime_ms={}",
+                schedule.pulse_count(),
+                kind.label(),
+                amplitude,
+                crate::schedule::PULSE_MS,
+                now
+            );
+        }
+        Effect::Neutral => {
             output.neutral()?;
+            eprintln!(
+                "Soberized pulse={} phase=neutral boottime_ms={}",
+                schedule.pulse_count(),
+                now
+            );
+        }
+        Effect::Exit(reason) => {
+            output.neutral()?;
+            eprintln!(
+                "Soberized stopped reason={} pulses={} boottime_ms={}",
+                reason.label(),
+                schedule.pulse_count(),
+                now
+            );
             return Ok(false);
         }
     }

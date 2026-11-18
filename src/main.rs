@@ -1,7 +1,9 @@
 use soberized::ipc::Client;
 use soberized::protocol::{Command as Operation, ReplyCode, State};
 use soberized::units::{self, SOCKET_UNIT};
-use soberized::{APP_ID, HELPER_PATH, HELPER_UNIT, SOCKET_PATH, USER_UNIT, helper, sober};
+use soberized::{
+    APP_ID, HELPER_PATH, HELPER_UNIT, SOCKET_PATH, USER_UNIT, helper, notify, roblox_log, sober,
+};
 use std::io;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
@@ -19,7 +21,7 @@ fn run() -> io::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.is_empty() || arguments == ["--help"] || arguments == ["help"] {
         println!(
-            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch                   Launch Sober with session-only controller access, then start\n  start                    Arm input for the current Sober instance\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
+            "Soberized {}\n\nUsage: soberized <command>\n\n  doctor [--sandbox-test]  Check installation and optional syscall self-test\n  launch                   Launch Sober with session-only controller access, then start\n  start                    Arm input for the current Sober instance\n  stop                     Stop input and remove the virtual controller\n  toggle                   Toggle the session controller (for a Sway shortcut)\n  status                   Show the controller and next scheduled pulse\n  test-input               Queue one brief movement pulse in 10 seconds\n\nPulses can move your avatar. Park in a safe location before starting.\nEnable gamepad access in Sober Settings before use. Stop before playing other games.\nBackground anti-idle compatibility is experimental; see README.md.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
@@ -47,6 +49,7 @@ fn run() -> io::Result<()> {
         "toggle" if unit_active(true, USER_UNIT) => stop(),
         "toggle" => start(),
         "status" => status(),
+        "test-input" => test_input(),
         "session" => session(), // Invoked by the root-owned systemd user unit.
         _ => Err(io::Error::other("unknown command; use soberized --help")),
     }
@@ -106,7 +109,9 @@ fn start() -> io::Result<()> {
         ));
     }
     control_service("start")?;
-    println!("Session controller started. Use soberized status to check that input is armed.");
+    println!(
+        "Session controller started. Pulses briefly move your avatar; use a safe location. Check soberized status to confirm input is armed."
+    );
     Ok(())
 }
 
@@ -126,9 +131,12 @@ fn status() -> io::Result<()> {
     installed()?;
     let session = units::query(true, USER_UNIT)?;
     if session.failed() {
+        if session.status.starts_with("Roblox disconnected:") {
+            return Err(io::Error::other(session.status));
+        }
         return Err(io::Error::other(format!(
-            "session controller failed ({}); inspect journalctl --user -u {USER_UNIT} -b",
-            session.result
+            "session controller failed ({}): {}; inspect journalctl --user -u {USER_UNIT} -b",
+            session.result, session.status
         )));
     }
     let controller = unit_active(true, USER_UNIT);
@@ -136,7 +144,11 @@ fn status() -> io::Result<()> {
         println!(
             "{}",
             if controller {
-                "Session controller is starting; check its journal if this persists."
+                if session.status.is_empty() {
+                    "Session controller is starting; check its journal if this persists."
+                } else {
+                    &session.status
+                }
             } else {
                 "Stopped."
             }
@@ -147,13 +159,39 @@ fn status() -> io::Result<()> {
     match response.state {
         State::Ready => println!("Waiting for a session lease; no pulses scheduled."),
         State::Armed => println!(
-            "Armed. Next pulse in {}s; {} pulses sent.",
+            "Armed (brief movement pulses). Next pulse in {}s; {} pulses sent.\nRoblox: monitoring client disconnects; server connection is unverified.",
             response.next_seconds, response.pulses
         ),
         State::Pulsing => println!(
             "Sending a bounded controller pulse; {} pulses sent.",
             response.pulses
         ),
+    }
+    Ok(())
+}
+
+fn test_input() -> io::Result<()> {
+    installed()?;
+    if !unit_active(true, USER_UNIT) || !unit_active(false, HELPER_UNIT) {
+        return Err(io::Error::other(
+            "start an active Soberized session before testing input",
+        ));
+    }
+    let response = Client::connect(Path::new(SOCKET_PATH))?.command(Operation::TestInput)?;
+    match response.code {
+        ReplyCode::Ok => println!(
+            "One 250 ms movement pulse is queued for 10 seconds from now. Place your avatar safely and watch for a brief step, then rest. Check the helper journal for deflect and neutral records."
+        ),
+        ReplyCode::Busy => {
+            return Err(io::Error::other(
+                "a test is already queued, a pulse is active, or the one-minute test cooldown has not elapsed",
+            ));
+        }
+        ReplyCode::NotOwner => {
+            return Err(io::Error::other(
+                "the helper has no active session; start Soberized before testing input",
+            ));
+        }
     }
     Ok(())
 }
@@ -195,18 +233,41 @@ fn launch() -> io::Result<()> {
 fn session() -> io::Result<()> {
     installed()?;
     let target = sober::instance()?.ok_or_else(|| io::Error::other("Sober is not running"))?;
+    let mut monitor =
+        roblox_log::Monitor::attach(roblox_log::default_path()?, sober::started_at(&target)?)?;
+    notify::status("Waiting for a Roblox game join; no movement pulses yet")?;
+    loop {
+        if sober::instance()?.as_ref() != Some(&target) {
+            return Ok(());
+        }
+        monitor.poll()?;
+        match monitor.latest() {
+            Some(roblox_log::Event::Disconnected { code: 285, .. }) => {
+                std::thread::sleep(Duration::from_secs(2))
+            }
+            Some(event @ roblox_log::Event::Disconnected { .. }) => {
+                let message = event.disconnect_message(None).unwrap();
+                notify::status(&message)?;
+                return Err(io::Error::other(message));
+            }
+            Some(roblox_log::Event::Joined { .. }) => break,
+            None => std::thread::sleep(Duration::from_secs(2)),
+        }
+    }
     let client = Client::connect(Path::new(SOCKET_PATH))?;
     if client.command(Operation::Arm)?.code != ReplyCode::Ok {
         return Err(io::Error::other(
             "another controller already owns the input lease",
         ));
     }
+    notify::status("Movement pulses active; monitoring Roblox disconnects")?;
     eprintln!(
-        "Soberized armed for Sober instance {}. Pulse interval: 10 minutes; stop before other games.",
+        "Soberized armed for Sober instance {}. Movement pulse: 250 ms at 50% left-stick deflection every 10 minutes; use a safe location and stop before other games.",
         target.id
     );
     let mut last_check = helper::boot_ms()?;
     let mut next_renewal = last_check + 10_000;
+    let mut transition_since = None;
     loop {
         std::thread::sleep(Duration::from_secs(2));
         let current = sober::instance()?;
@@ -221,6 +282,38 @@ fn session() -> io::Result<()> {
         if current.as_ref() != Some(&target) {
             eprintln!("Sober instance ended or changed; Soberized stopped.");
             return Ok(());
+        }
+        monitor.poll()?;
+        if matches!(
+            monitor.latest(),
+            Some(roblox_log::Event::Disconnected { code: 285, .. })
+        ) {
+            let since = *transition_since.get_or_insert(now);
+            // A teleport also closes the old connection. Give the next join
+            // time to arrive before treating this as returning to the home UI.
+            if now.saturating_sub(since) >= 3_000 {
+                notify::status(
+                    "Roblox session ended; input stopped. Join an experience and run soberized start.",
+                )?;
+                return Ok(());
+            }
+        } else if let Some(event @ roblox_log::Event::Disconnected { .. }) = monitor.latest() {
+            let pulses = client
+                .command(Operation::Status)
+                .ok()
+                .map(|response| response.pulses);
+            let message = event.disconnect_message(pulses).unwrap();
+            notify::status(&message)?;
+            // Dropping this owner connection removes the gamepad. Do not
+            // navigate/rejoin automatically or continue reporting input active.
+            return Err(io::Error::other(message));
+        } else if monitor.latest().is_none() {
+            notify::status(
+                "Sober log disappeared; input stopped. Check the client log and restart Soberized.",
+            )?;
+            return Err(io::Error::other("Sober log disappeared; input stopped"));
+        } else {
+            transition_since = None;
         }
         if now >= next_renewal {
             let response = client.command(Operation::Renew)?;
@@ -253,7 +346,33 @@ fn doctor(sandbox_test: bool) -> io::Result<()> {
         }
     }
     match sober::instance() {
-        Ok(Some(_)) => println!("Sober instance: running"),
+        Ok(Some(instance)) => {
+            println!("Sober instance: running");
+            let observed = (|| -> io::Result<Option<roblox_log::Event>> {
+                let monitor = roblox_log::Monitor::attach(
+                    roblox_log::default_path()?,
+                    sober::started_at(&instance)?,
+                )?;
+                Ok(monitor.latest().cloned())
+            })();
+            match observed {
+                Ok(Some(roblox_log::Event::Disconnected { code: 285, .. })) => {
+                    println!("Roblox log: waiting for the next game join")
+                }
+                Ok(Some(event @ roblox_log::Event::Disconnected { .. })) => {
+                    println!("{}", event.disconnect_message(None).unwrap());
+                    ready = false;
+                }
+                Ok(Some(roblox_log::Event::Joined { timestamp })) => println!(
+                    "Roblox log: last observed game join at {timestamp}; connection is unverified"
+                ),
+                Ok(None) => println!("Roblox log: waiting for a game join"),
+                Err(error) => {
+                    println!("Roblox log: {error}");
+                    ready = false;
+                }
+            }
+        }
         Ok(None) => println!("Sober instance: stopped"),
         Err(error) => {
             println!("Sober instance: {error}");

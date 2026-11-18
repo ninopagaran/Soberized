@@ -5,10 +5,15 @@ The first version provides a CLI and an optional Sway shortcut. Background
 anti-idle compatibility is **experimental until the host checks pass**.
 
 Soberized creates one Xbox-compatible virtual controller, named
-`Soberized Virtual Gamepad`. Every ten minutes, it moves the right stick to
-25% for 250 ms and returns every control to neutral. Pulse direction alternates.
-This can move the in-game camera; it does not intentionally move the avatar.
-Whether that input resets an experience's idle timer needs testing.
+`Soberized Virtual Gamepad`. After observing a Roblox game join, every ten
+minutes it moves the **left stick to 50% for 250 ms**, then returns every control
+to neutral. Pulse direction alternates. **This briefly moves your avatar.** Park
+on safe, flat ground; alternating directions cannot guarantee the same position
+afterward. Whether the input resets an experience's idle timer needs testing.
+
+Version 0.2 replaces the camera-only pulse that failed the initial overnight
+idle test. It also watches Roblox's engine log and stops the input session on an
+observed disconnect, including idle error 278. It does not reconnect automatically.
 
 ## Security design
 
@@ -40,6 +45,9 @@ Linux uinput → virtual gamepad → Sober
 - Input stops on owner disconnect, a 30-second lease expiry, Sober exit/instance
   change, or a scheduling/suspend gap longer than five seconds. Resume requires
   an explicit start. No missed pulses are replayed.
+- The session process reads a bounded portion of Sober's log to observe joins
+  and disconnect reasons. It does not retain account IDs, addresses, or tickets.
+  The isolated helper never reads the client log.
 
 See [SECURITY.md](SECURITY.md) for the threat model and review details.
 
@@ -117,9 +125,43 @@ it is narrower than `--device=all`, but is **not** a per-controller permission.
 With Sober already launched with appropriate access, use `soberized start`.
 Starting cannot retrofit device permissions into an existing Flatpak sandbox.
 
+On launch, status first shows `Waiting for a Roblox game join`. Join an experience
+and stand in a safe location; the controller then arms. An observed Roblox error
+stops input and remains visible in `soberized status` with the reason and pulse
+count. After rejoining, run `soberized start` to begin a new session.
+
+To test input delivery without waiting ten minutes:
+
+```sh
+soberized test-input
+```
+
+This queues **one fixed movement pulse after ten seconds** while a session is
+armed. It is limited to one diagnostic per minute during a helper lifetime,
+does not renew the session lease, and resets the next regular pulse to ten
+minutes after the diagnostic. The helper's journal records the pulse start,
+source, count, and neutral reset. First test with Sober visible, then while it is
+on another workspace. Reading the counter alone does not prove Roblox accepted
+the input or reset its idle timer.
+
 Follow [the host validation procedure](docs/VALIDATION.md) before depending on
 anti-idle behavior. An “Armed” status means the scheduler owns a lease, not that
 Roblox has confirmed idle prevention.
+
+When updating from 0.1, stop the old session, rebuild, and reinstall both binaries
+and the service files:
+
+```sh
+soberized stop
+cargo build --release --locked --offline
+sudo ./scripts/install.sh --user nino
+systemctl --user daemon-reload
+soberized start
+```
+
+The 0.2 protocol deliberately rejects the old camera-only helper. An incompatible
+helper error means the installed CLI/helper or the still-running old session must
+be updated together.
 
 ## Sway shortcut and stopping
 
@@ -140,6 +182,11 @@ journalctl --user -u soberized-session.service -b
 journalctl -u soberized-helper.service -b
 soberized doctor
 ```
+
+For a pulse history, use `journalctl -u soberized-helper.service -b --grep='Soberized pulse='`.
+Each successful `phase=deflect` record should have a corresponding `phase=neutral`
+record about 250 ms later, subject to scheduling latency. Disconnect timestamps
+in status come from Roblox's log in UTC; journal timestamps use your local zone.
 
 Closing Sober without `soberized stop` ends its input lease automatically. The
 helper socket stays available for a later launch. If `status` reports a failed

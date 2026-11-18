@@ -199,7 +199,10 @@ impl Client {
         let mut bytes = [0; RESPONSE_LEN];
         let size = receive_packet(self.fd.as_raw_fd(), &mut bytes, false)?;
         if size != RESPONSE_LEN {
-            return Err(io::Error::other("invalid helper response size"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid or incompatible helper response; reinstall the current CLI and helper together",
+            ));
         }
         Response::decode(&bytes)
     }

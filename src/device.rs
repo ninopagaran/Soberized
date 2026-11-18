@@ -8,7 +8,7 @@ pub const NAME: &str = "Soberized Virtual Gamepad";
 const EV_SYN: u32 = 0;
 const EV_KEY: u32 = 1;
 const EV_ABS: u32 = 3;
-const ABS_RX: u32 = 3;
+const ABS_X: u32 = 0;
 const BUTTONS: &[u32] = &[
     0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e,
 ];
@@ -127,7 +127,7 @@ impl Output for Gamepad {
                 "unsupported controller pulse",
             ));
         }
-        self.event(EV_ABS, ABS_RX, amplitude)?;
+        self.event(EV_ABS, ABS_X, amplitude)?;
         self.event(EV_SYN, 0, 0)
     }
 

@@ -10,6 +10,7 @@ pub struct UnitStatus {
     pub load: String,
     pub active: String,
     pub result: String,
+    pub status: String,
 }
 
 impl UnitStatus {
@@ -18,6 +19,7 @@ impl UnitStatus {
             load: String::new(),
             active: String::new(),
             result: String::new(),
+            status: String::new(),
         };
         for line in text.lines() {
             if let Some((name, value)) = line.split_once('=') {
@@ -25,6 +27,7 @@ impl UnitStatus {
                     "LoadState" => status.load = value.to_owned(),
                     "ActiveState" => status.active = value.to_owned(),
                     "Result" => status.result = value.to_owned(),
+                    "StatusText" => status.status = value.to_owned(),
                     _ => {}
                 }
             }
@@ -55,6 +58,7 @@ pub fn query(user: bool, unit: &str) -> io::Result<UnitStatus> {
             "--property=LoadState",
             "--property=ActiveState",
             "--property=Result",
+            "--property=StatusText",
         ])
         .stdin(Stdio::null())
         .output()?;

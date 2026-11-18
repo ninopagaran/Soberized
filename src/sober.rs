@@ -1,6 +1,7 @@
 use crate::APP_ID;
 use std::io;
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Instance {
@@ -51,6 +52,31 @@ pub fn instance() -> io::Result<Option<Instance>> {
     let text = std::str::from_utf8(&output.stdout)
         .map_err(|_| io::Error::other("invalid Flatpak metadata encoding"))?;
     parse_instances(text)
+}
+
+pub fn started_at(instance: &Instance) -> io::Result<SystemTime> {
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", instance.pid))?;
+    let fields = stat
+        .rsplit_once(')')
+        .ok_or_else(|| io::Error::other("invalid Sober process metadata"))?
+        .1;
+    let ticks = fields
+        .split_whitespace()
+        .nth(19)
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| io::Error::other("invalid Sober process start time"))?;
+    // SAFETY: sysconf reads a system constant and has no pointer arguments.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if hz <= 0 {
+        return Err(io::Error::other(
+            "could not obtain the process clock frequency",
+        ));
+    }
+    let started_ms = ticks.saturating_mul(1000) / (hz as u64);
+    let age = crate::helper::boot_ms()?.saturating_sub(started_ms);
+    SystemTime::now()
+        .checked_sub(Duration::from_millis(age))
+        .ok_or_else(|| io::Error::other("invalid process lifetime"))
 }
 
 #[cfg(test)]

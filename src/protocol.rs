@@ -3,7 +3,7 @@ use std::io;
 
 pub const REQUEST_LEN: usize = 8;
 pub const RESPONSE_LEN: usize = 16;
-const MAGIC: [u8; 4] = [b'S', b'B', b'Z', 1];
+const MAGIC: [u8; 4] = [b'S', b'B', b'Z', 2];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -12,6 +12,7 @@ pub enum Command {
     Renew = 2,
     Stop = 3,
     Status = 4,
+    TestInput = 5,
 }
 
 impl Command {
@@ -31,6 +32,7 @@ impl Command {
             2 => Ok(Self::Renew),
             3 => Ok(Self::Stop),
             4 => Ok(Self::Status),
+            5 => Ok(Self::TestInput),
             _ => Err(invalid()),
         }
     }
@@ -99,7 +101,7 @@ impl Response {
 fn invalid() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        "invalid Soberized protocol message",
+        "invalid or incompatible Soberized protocol message; reinstall the current CLI and helper together",
     )
 }
 
@@ -109,7 +111,13 @@ mod tests {
 
     #[test]
     fn commands_round_trip_and_reject_untrusted_bytes() {
-        for command in [Command::Arm, Command::Renew, Command::Stop, Command::Status] {
+        for command in [
+            Command::Arm,
+            Command::Renew,
+            Command::Stop,
+            Command::Status,
+            Command::TestInput,
+        ] {
             assert_eq!(Command::decode(&command.encode()).unwrap(), command);
         }
         for length in 0..=32 {
@@ -136,5 +144,21 @@ mod tests {
             bytes[index] = 255;
             assert!(Response::decode(&bytes).is_err());
         }
+    }
+
+    #[test]
+    fn old_camera_only_helper_is_not_accepted_as_the_movement_helper() {
+        let mut request = Command::Arm.encode();
+        request[3] = 1;
+        assert!(Command::decode(&request).is_err());
+        let mut response = Response {
+            state: State::Armed,
+            code: ReplyCode::Ok,
+            next_seconds: 600,
+            pulses: 0,
+        }
+        .encode();
+        response[3] = 1;
+        assert!(Response::decode(&response).is_err());
     }
 }
