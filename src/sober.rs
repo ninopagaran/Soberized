@@ -25,7 +25,6 @@ pub fn parse_instances(text: &str) -> io::Result<Option<Instance>> {
         let pid = columns[2]
             .parse::<u32>()
             .ok()
-            .filter(|pid| *pid > 0)
             .ok_or_else(|| io::Error::other("invalid Sober process ID"))?;
         if found.is_some() {
             return Err(io::Error::other(
@@ -36,6 +35,14 @@ pub fn parse_instances(text: &str) -> io::Result<Option<Instance>> {
             id: columns[0].to_owned(),
             pid,
         });
+    }
+    if found.as_ref().is_some_and(|instance| instance.pid == 0) {
+        // Flatpak publishes the instance before assigning its process ID. Keep
+        // this distinct from absence: a second launch must not race that app.
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Sober is still starting; Flatpak has not assigned its process ID yet",
+        ));
     }
     Ok(found)
 }
@@ -52,6 +59,19 @@ pub fn instance() -> io::Result<Option<Instance>> {
     let text = std::str::from_utf8(&output.stdout)
         .map_err(|_| io::Error::other("invalid Flatpak metadata encoding"))?;
     parse_instances(text)
+}
+
+/// Startup polling only: wait for a positive PID before binding a lease target.
+/// Active-session monitoring and duplicate-launch checks use the strict query.
+pub fn instance_when_ready() -> io::Result<Option<Instance>> {
+    startup_result(instance())
+}
+
+fn startup_result(result: io::Result<Option<Instance>>) -> io::Result<Option<Instance>> {
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        other => other,
+    }
 }
 
 pub fn started_at(instance: &Instance) -> io::Result<SystemTime> {
@@ -105,5 +125,41 @@ mod tests {
         ] {
             assert!(parse_instances(line).is_err());
         }
+    }
+
+    #[test]
+    fn startup_waits_through_zero_pid_without_treating_it_as_absent_for_launch_checks() {
+        let pending = "42\torg.vinegarhq.Sober\t0\n";
+        assert_eq!(
+            parse_instances(pending).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        for snapshot in ["", pending] {
+            assert_eq!(startup_result(parse_instances(snapshot)).unwrap(), None);
+        }
+        assert_eq!(
+            startup_result(parse_instances("42\torg.vinegarhq.Sober\t1234\n")).unwrap(),
+            Some(Instance {
+                id: "42".into(),
+                pid: 1234
+            })
+        );
+    }
+
+    #[test]
+    fn pending_instances_do_not_hide_duplicates_or_real_metadata_errors() {
+        for (first, second) in [(0, 0), (0, 1234), (1234, 0)] {
+            let snapshot = format!("42 {APP_ID} {first}\n43 {APP_ID} {second}\n");
+            let error = startup_result(parse_instances(&snapshot)).unwrap_err();
+            assert_ne!(error.kind(), io::ErrorKind::WouldBlock);
+            assert!(error.to_string().contains("multiple Sober instances"));
+        }
+        assert!(startup_result(parse_instances("42 org.vinegarhq.Sober invalid\n")).is_err());
+        assert_eq!(
+            startup_result(Err(io::Error::from(io::ErrorKind::PermissionDenied)))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }

@@ -1,7 +1,8 @@
 # Host validation gates
 
-Status: **0.1 and 0.2 both failed idle testing. Version 0.3 prepares the controller
-before Sober starts; its behavior in the actual game remains unverified.**
+Status: **0.1 and 0.2 failed idle testing. Version 0.4's Gamescope mode now passes
+the visible/unfocused movement test; unattended hidden-workspace idle prevention
+is still pending. Version 0.4.1 fixes a separately observed startup PID race.**
 
 On 2026-11-18, the 0.2 helper wrote and reset four 250 ms movement pulses at
 09:16, 09:26, 09:36, and 09:46 Asia/Manila. Roblox reported idle error 278 at
@@ -37,6 +38,10 @@ lacked a Vulkan userspace driver: Gamescope's instance creation and an independe
 minimal Vulkan probe both returned `-9`. The neutral helper stopped after zero
 pulses and the device disappeared. Install the appropriate host Vulkan driver
 and pass `vulkaninfo --summary` before repeating [Gamescope validation](GAMESCOPE.md).
+After that installation, Vulkan enumeration and a Gamescope launch succeeded.
+The user confirmed avatar movement with a terminal focused during the diagnostic
+at 11:38:28 Asia/Manila. A hidden-workspace trial is needed to validate idle
+prevention. The earlier focused success on 0.2 remains separate from this result.
 
 ## 1. Before creating a controller
 

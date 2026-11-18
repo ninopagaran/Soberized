@@ -19,7 +19,7 @@ trial still ended with idle error 278. That run used the installed 0.2.0 binarie
 the 0.3.0 build had not been installed. Visible movement alone does not establish
 idle prevention or prove that startup order caused the successful input test.
 
-Version 0.3 prepares a **neutral controller before launching Sober**, waits for
+Since version 0.3, `launch` prepares a **neutral controller before starting Sober**, waits for
 its event node to be readable, and enables movement only after a game join. This
 removes late controller creation from the launch path; whether it resolves
 Sober/Roblox's input handling still needs a focused diagnostic and unattended
@@ -28,8 +28,11 @@ idle error 278. Soberized does not reconnect automatically.
 
 The repeated visible-but-unfocused diagnostic also produced no movement with a
 terminal focused. Version 0.4 adds an optional **Gamescope nested Wayland launch**
-to test focus handling independently of Sway's active window. This mode has not
-yet passed the real-game background/idle checks. See [Gamescope mode](docs/GAMESCOPE.md).
+to test focus handling independently of Sway's active window. After installing
+the host AMD Vulkan driver, this mode launched and the user confirmed movement
+with a terminal focused. Unattended hidden-workspace idle validation is still
+pending. Version 0.4.1 also waits through Flatpak's temporary zero-PID startup
+state instead of aborting the launch. See [Gamescope mode](docs/GAMESCOPE.md).
 
 ## Security design
 
@@ -204,7 +207,7 @@ Protocol version 3 rejects helpers without neutral preparation. An incompatible
 helper error means the installed CLI/helper or the still-running old session must
 be updated together. `start` attaches to an existing instance and cannot repeat
 the controller-before-Sober startup sequence; use `launch` for this diagnostic.
-Verify that the installed command reports `soberized 0.4.0` before testing this
+Verify that the installed command reports `soberized 0.4.1` before testing this
 release. Building in `target/release` does not update `/usr/bin/soberized` or the
 root-owned helper. Status, doctor, and new runtime journal records include their
 build version to make this distinction visible.

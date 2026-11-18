@@ -290,7 +290,7 @@ fn launch_prepared(mode: LaunchMode) -> io::Result<()> {
                     "Sober launcher exited during startup ({exit})"
                 )));
             }
-            if sober::instance()?.is_some() {
+            if sober::instance_when_ready()?.is_some() {
                 println!(
                     "Sober launched with the virtual controller already present. Movement stays disabled until a Roblox game join; check soberized status."
                 );
@@ -401,7 +401,7 @@ fn session() -> io::Result<()> {
     notify::status("Waiting for Sober startup; virtual controller prepared, movement disabled")?;
     let target = loop {
         let now = lease.check()?;
-        if let Some(target) = sober::instance()? {
+        if let Some(target) = sober::instance_when_ready()? {
             break target;
         }
         if now >= startup_deadline {

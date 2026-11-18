@@ -38,7 +38,7 @@ soberized doctor --sandbox-test
 soberized launch --gamescope
 ```
 
-The installed version must be `soberized 0.4.0`. Both root-owned binaries must
+The installed version for the latest build must be `soberized 0.4.1`. Both root-owned binaries must
 be updated; a successful build alone does not update installed code. Enable
 gamepad support in Sober Settings before launching.
 The Vulkan summary must succeed and list the intended GPU before proceeding.
@@ -90,9 +90,26 @@ returned the same error independently of Gamescope. The matching package version
 in Arch's local repository metadata was `1:26.2.7-1`, matching installed Mesa.
 
 The failed launch stopped its owner and removed the neutral virtual controller
-after zero pulses. Actual compositor startup, native Wayland focus behavior,
-background input, and idle prevention still require the tests above after the
-driver is installed. No successful idle result is claimed.
+after zero pulses. After driver installation, host Vulkan enumeration succeeded
+with RADV/Mesa 26.2.7, Gamescope created `gamescope-0`, and Sober launched inside
+it. Sway showed only the outer Gamescope surface, while Flatpak's display
+permissions allowed Wayland and disabled X11. A diagnostic at 11:38:28
+Asia/Manila had a matching neutral reset, and the user confirmed visible avatar
+movement with the terminal focused. This passes the visible/unfocused delivery
+test for the installed 0.4.0 build; it does not establish idle prevention on a
+hidden workspace. That unattended test remains pending.
+
+## Temporary Flatpak process ID during startup
+
+One launch after driver installation failed with `invalid Sober process ID`.
+A fast metadata capture showed Flatpak publishing a Sober instance with PID `0`
+before replacing it with the actual positive PID. A retry of 0.4.0 succeeded.
+
+Version 0.4.1 waits through that pending state only in the bounded startup loops.
+It never binds a lease target to PID zero. Duplicate-instance checks still
+recognize the pending app, malformed metadata still fails, and active-session
+monitoring remains strict. The running 0.4.0 trial can continue; install 0.4.1
+after the trial for reliable subsequent launches.
 
 ## Vulkan startup failure
 
