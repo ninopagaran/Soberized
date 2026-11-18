@@ -1,8 +1,8 @@
 # Host validation gates
 
-Status: **0.1 and 0.2 failed idle testing. Version 0.4's Gamescope mode now passes
-the visible/unfocused movement test; unattended hidden-workspace idle prevention
-is still pending. Version 0.4.1 fixes a separately observed startup PID race.**
+Status: **0.4's Gamescope mode passed visible/unfocused movement and a 30-minute
+hidden-workspace trial with no logged disconnect on this machine. Versions 0.1
+and 0.2 failed idle testing. Version 0.4.1 fixes a separate startup PID race.**
 
 On 2026-11-18, the 0.2 helper wrote and reset four 250 ms movement pulses at
 09:16, 09:26, 09:36, and 09:46 Asia/Manila. Roblox reported idle error 278 at
@@ -28,10 +28,8 @@ attributed to that change. The launcher already had the SDL background hint set.
 
 The user repeated the visible-but-unfocused movement test and again reported no
 movement with the terminal focused. Version 0.4 adds `launch --gamescope` as an
-experimental focus workaround; [its real-game validation](GAMESCOPE.md) is
-pending. Focused movement, background movement, and idle prevention remain
-separate gates. Neither the new mode nor a shorter pulse interval is proven to
-resolve the idle failure.
+experimental focus workaround. Focused movement, background movement, and idle
+prevention are separate gates; the observed Gamescope result is recorded below.
 
 The first 0.4.0 Gamescope launch failed before Sober started because the AMD host
 lacked a Vulkan userspace driver: Gamescope's instance creation and an independent
@@ -40,8 +38,42 @@ pulses and the device disappeared. Install the appropriate host Vulkan driver
 and pass `vulkaninfo --summary` before repeating [Gamescope validation](GAMESCOPE.md).
 After that installation, Vulkan enumeration and a Gamescope launch succeeded.
 The user confirmed avatar movement with a terminal focused during the diagnostic
-at 11:38:28 Asia/Manila. A hidden-workspace trial is needed to validate idle
-prevention. The earlier focused success on 0.2 remains separate from this result.
+at 11:38:28 Asia/Manila. The earlier focused success on 0.2 remains separate from
+this result.
+
+## Observed Gamescope trial: 2026-11-18
+
+The installed **Soberized 0.4.0**, Gamescope 3.17.0, and host AMD RADV/Mesa
+26.2.7 completed an observation from **11:41:00 to 12:11:00 Asia/Manila**. The
+same Sober Flatpak instance and helper stayed active. Gamescope was hidden on
+another Sway workspace while the user worked elsewhere.
+
+| Local time | Pulse | Source | Neutral reset after deflection |
+| --- | --- | --- | --- |
+| 11:38:28 | 1 | Diagnostic before the trial | 253 ms |
+| 11:48:28 | 2 | Scheduled during the trial | 250 ms |
+| 11:58:28 | 3 | Scheduled during the trial | 264 ms |
+| 12:08:28 | 4 | Scheduled during the trial | 251 ms |
+
+The observer sampled Sway window visibility/focus every two seconds and
+instance/controller status about every ten seconds. There were **162 status
+samples**. It recorded no visibility/focus or instance change during its active
+sampling. Two gaps were retained in the record: 57 seconds after the observer
+mistook the valid Pulsing state for failure, and approximately 127 seconds after
+the tool server restarted. Neither event stopped Soberized. The user explicitly
+confirmed that Roblox stayed hidden and received no manual input throughout
+11:58:28–12:02:53, covering both gaps.
+
+The final controller remained Armed with four total pulses. The continuously
+running client-log monitor reported no disconnect, and a bounded engine-log
+scan found no join or disconnect event during the observation. The local record
+contains status/timing metadata only; it is not committed as machine-local data.
+
+**Result:** this run passed the 30-minute hidden-workspace idle check. It remains
+a single-run result using client-log observations, without independent server
+confirmation. Overnight, scratchpad, other-experience, and other-machine results
+are not established. The 0.4.1 startup fix was built and passed all 41 available
+Rust tests separately; it was not installed during this trial.
 
 ## 1. Before creating a controller
 

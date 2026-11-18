@@ -9,7 +9,8 @@ Soberized creates one Xbox-compatible virtual controller, named
 minutes it moves the **left stick to 50% for 250 ms**, then returns every control
 to neutral. Pulse direction alternates. **This briefly moves your avatar.** Park
 on safe, flat ground; alternating directions cannot guarantee the same position
-afterward. Whether the input resets an experience's idle timer needs testing.
+afterward. Idle compatibility depends on the display mode and experience; see
+the tested Gamescope result below.
 
 Both the 0.1 camera pulse and 0.2 movement pulse failed idle testing. In the 0.2
 focused diagnostic, the user saw no avatar movement despite successful kernel
@@ -19,20 +20,23 @@ trial still ended with idle error 278. That run used the installed 0.2.0 binarie
 the 0.3.0 build had not been installed. Visible movement alone does not establish
 idle prevention or prove that startup order caused the successful input test.
 
-Since version 0.3, `launch` prepares a **neutral controller before starting Sober**, waits for
-its event node to be readable, and enables movement only after a game join. This
-removes late controller creation from the launch path; whether it resolves
-Sober/Roblox's input handling still needs a focused diagnostic and unattended
-trial. The client log monitor stops input on an observed disconnect, including
+Since version 0.3, `launch` prepares a **neutral controller before starting
+Sober**, waits for its event node to be readable, and enables movement only after
+a game join. This makes the controller available during client startup. The
+client log monitor stops input on an observed disconnect, including
 idle error 278. Soberized does not reconnect automatically.
 
 The repeated visible-but-unfocused diagnostic also produced no movement with a
 terminal focused. Version 0.4 adds an optional **Gamescope nested Wayland launch**
 to test focus handling independently of Sway's active window. After installing
 the host AMD Vulkan driver, this mode launched and the user confirmed movement
-with a terminal focused. Unattended hidden-workspace idle validation is still
-pending. Version 0.4.1 also waits through Flatpak's temporary zero-PID startup
-state instead of aborting the launch. See [Gamescope mode](docs/GAMESCOPE.md).
+with a terminal focused. The installed 0.4.0 build then completed a **30-minute
+hidden-workspace trial with no logged disconnect**, with three scheduled pulses
+and matching neutral resets. Observer sampling gaps were recorded and the user
+confirmed no manual Roblox input during them. This validates that run on this
+machine; overnight behavior and other experiences remain untested. Version
+0.4.1 also waits through Flatpak's temporary zero-PID startup state instead of
+aborting the launch. See [Gamescope mode](docs/GAMESCOPE.md).
 
 ## Security design
 

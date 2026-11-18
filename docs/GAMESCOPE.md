@@ -95,9 +95,18 @@ with RADV/Mesa 26.2.7, Gamescope created `gamescope-0`, and Sober launched insid
 it. Sway showed only the outer Gamescope surface, while Flatpak's display
 permissions allowed Wayland and disabled X11. A diagnostic at 11:38:28
 Asia/Manila had a matching neutral reset, and the user confirmed visible avatar
-movement with the terminal focused. This passes the visible/unfocused delivery
-test for the installed 0.4.0 build; it does not establish idle prevention on a
-hidden workspace. That unattended test remains pending.
+movement with the terminal focused. The same installed 0.4.0 build then completed
+a 30-minute hidden-workspace observation from 11:41:00 to 12:11:00 Asia/Manila
+without a logged disconnect. Three scheduled pulses occurred during the trial,
+with matching neutral resets, and the session remained armed with four total
+pulses including the diagnostic.
+
+The observer had two recorded sampling gaps, approximately 57 and 127 seconds;
+Soberized's own disconnect monitor kept running. The user confirmed Roblox
+stayed hidden and untouched during both gaps. See the full
+[validation record](VALIDATION.md#observed-gamescope-trial-2026-11-18). This is a
+successful result for this run; overnight and other-experience behavior remain
+unverified.
 
 ## Temporary Flatpak process ID during startup
 
@@ -108,8 +117,8 @@ before replacing it with the actual positive PID. A retry of 0.4.0 succeeded.
 Version 0.4.1 waits through that pending state only in the bounded startup loops.
 It never binds a lease target to PID zero. Duplicate-instance checks still
 recognize the pending app, malformed metadata still fails, and active-session
-monitoring remains strict. The running 0.4.0 trial can continue; install 0.4.1
-after the trial for reliable subsequent launches.
+monitoring remains strict. The current 0.4.0 session can keep running; install
+0.4.1 when updating for subsequent launches.
 
 ## Vulkan startup failure
 
