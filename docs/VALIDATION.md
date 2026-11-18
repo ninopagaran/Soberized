@@ -32,6 +32,12 @@ pending. Focused movement, background movement, and idle prevention remain
 separate gates. Neither the new mode nor a shorter pulse interval is proven to
 resolve the idle failure.
 
+The first 0.4.0 Gamescope launch failed before Sober started because the AMD host
+lacked a Vulkan userspace driver: Gamescope's instance creation and an independent
+minimal Vulkan probe both returned `-9`. The neutral helper stopped after zero
+pulses and the device disappeared. Install the appropriate host Vulkan driver
+and pass `vulkaninfo --summary` before repeating [Gamescope validation](GAMESCOPE.md).
+
 ## 1. Before creating a controller
 
 Run as the desktop user:

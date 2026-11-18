@@ -142,11 +142,13 @@ it is narrower than `--device=all`, but is **not** a per-controller permission.
 With Sober already launched with appropriate access, use `soberized start`.
 Starting cannot retrofit device permissions into an existing Flatpak sandbox.
 
-For the experimental focus workaround, install Gamescope from Arch's repository,
-close Sober, and use:
+For the experimental focus workaround, install Gamescope and a working host
+Vulkan driver from Arch's repository. On this AMD Cezanne machine, use
+`vulkan-radeon` (the Vulkan loader alone is insufficient). Close Sober, then use:
 
 ```sh
-sudo pacman -S --needed gamescope
+sudo pacman -S --needed gamescope vulkan-radeon vulkan-tools
+vulkaninfo --summary
 soberized launch --gamescope
 ```
 

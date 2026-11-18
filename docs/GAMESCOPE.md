@@ -19,11 +19,18 @@ an optional package from Arch's official Extra repository. Soberized does not
 install packages, fetch executable files, change device permissions, or change
 Sober configuration.
 
+Gamescope also needs a working **host Vulkan driver**. Sober's Flatpak graphics
+runtime does not supply one to host Gamescope. This machine has an AMD Cezanne
+GPU using the `amdgpu` kernel driver; its matching Vulkan userspace package is
+`vulkan-radeon`. The `mesa` and `vulkan-icd-loader` packages alone do not provide
+that driver. Use the GPU-appropriate driver on other machines.
+
 Close the current Sober window completely, then run:
 
 ```sh
 soberized stop
-sudo pacman -S --needed gamescope
+sudo pacman -S --needed gamescope vulkan-radeon vulkan-tools
+vulkaninfo --summary
 sudo ./scripts/install.sh --user nino
 systemctl --user daemon-reload
 soberized --version
@@ -34,6 +41,7 @@ soberized launch --gamescope
 The installed version must be `soberized 0.4.0`. Both root-owned binaries must
 be updated; a successful build alone does not update installed code. Enable
 gamepad support in Sober Settings before launching.
+The Vulkan summary must succeed and list the intended GPU before proceeding.
 
 The virtual controller is prepared first and stays neutral until a game join.
 Gamescope creates a 1280×720 display with a 30 FPS limit both while focused and
@@ -74,10 +82,32 @@ The gamepad option, narrow device access, lease checks, and disconnect monitor
 are still required. Do not treat a passing command-profile test as a passing
 compositor or Roblox test.
 
-Status: Gamescope is not installed on the development host yet. The launch
-profile can be checked with harmless stand-in programs, but compositor startup,
-native Wayland focus behavior, background input, and idle prevention require
-the host tests above. No successful idle result is claimed.
+Status: Gamescope 3.17.0 and Soberized 0.4.0 are now installed on this host. The
+first nested launch failed at `vkCreateInstance` with result `-9`
+(`VK_ERROR_INCOMPATIBLE_DRIVER`). The host had the Vulkan loader but no driver
+manifests, and `vulkan-radeon` was absent. A minimal host Vulkan instance probe
+returned the same error independently of Gamescope. The matching package version
+in Arch's local repository metadata was `1:26.2.7-1`, matching installed Mesa.
+
+The failed launch stopped its owner and removed the neutral virtual controller
+after zero pulses. Actual compositor startup, native Wayland focus behavior,
+background input, and idle prevention still require the tests above after the
+driver is installed. No successful idle result is claimed.
+
+## Vulkan startup failure
+
+For this AMD machine, fix the missing driver and retry the already installed
+Soberized release:
+
+```sh
+sudo pacman -S --needed vulkan-radeon vulkan-tools
+vulkaninfo --summary
+soberized launch --gamescope
+```
+
+The `No CAP_SYS_NICE` message is a fallback to ordinary scheduling, separate
+from the Vulkan failure. Soberized requests no scheduling capabilities. There
+is no need to rebuild/reinstall the companion just to install the Vulkan driver.
 
 ## Primary references
 
@@ -86,4 +116,6 @@ the host tests above. No successful idle result is claimed.
 - [Nested display environment setup](https://github.com/ValveSoftware/gamescope/blob/master/src/main.cpp)
 - [Optional Vulkan layer environment switches](https://github.com/ValveSoftware/gamescope/blob/master/layer/VkLayer_FROG_gamescope_wsi.json.in)
 - [Arch Gamescope package](https://archlinux.org/packages/extra/x86_64/gamescope/)
+- [Arch AMD Vulkan driver](https://archlinux.org/packages/extra/x86_64/vulkan-radeon/)
+- [Vulkan result codes](https://docs.vulkan.org/refpages/latest/refpages/source/VkResult.html)
 - [Flatpak display socket permissions](https://docs.flatpak.org/en/latest/sandbox-permissions.html)
