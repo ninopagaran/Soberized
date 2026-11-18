@@ -9,11 +9,16 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub const JOIN_WAIT_MS: u64 = 90_000;
+pub const MAX_ATTEMPTS: usize = 10;
 const MARKER: &str = "soberized-auto-reconnect";
 const VALUE: &[u8] = b"gamescope-dialog-v1\n";
 
 pub fn recoverable(code: u16) -> bool {
     matches!(code, 266 | 277 | 278)
+}
+
+pub fn retryable_recognition(kind: io::ErrorKind, diagnostic: bool) -> bool {
+    !diagnostic && matches!(kind, io::ErrorKind::InvalidData | io::ErrorKind::TimedOut)
 }
 
 pub fn dependencies() -> io::Result<()> {
@@ -122,12 +127,16 @@ pub struct RetryBudget {
 impl RetryBudget {
     pub fn next_delay(&mut self) -> io::Result<u64> {
         self.stable_since = None;
-        let delay = [15_000, 30_000, 60_000]
-            .get(self.attempts)
-            .copied()
-            .ok_or_else(|| {
-                io::Error::other("auto-reconnect exhausted three attempts; input stopped")
-            })?;
+        if self.attempts >= MAX_ATTEMPTS {
+            return Err(io::Error::other(format!(
+                "auto-reconnect exhausted {MAX_ATTEMPTS} attempts; input stopped"
+            )));
+        }
+        let delay = match self.attempts {
+            0 => 15_000,
+            1 => 30_000,
+            _ => 60_000,
+        };
         self.attempts += 1;
         Ok(delay)
     }
@@ -166,7 +175,7 @@ impl Scratch {
 }
 impl Drop for Scratch {
     fn drop(&mut self) {
-        for name in ["frame.png", "ocr.tsv", "preference"] {
+        for name in ["frame.png", "ocr.tsv", "adaptive.tsv", "preference"] {
             let _ = std::fs::remove_file(self.0.join(name));
         }
         let _ = std::fs::remove_dir(&self.0);
@@ -193,7 +202,8 @@ fn run_bounded(command: &mut Command, timeout: Duration) -> io::Result<()> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(io::Error::other(
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
                 "dialog capture or OCR timed out; no click sent",
             ));
         }
@@ -233,26 +243,58 @@ pub fn find_button(endpoint: &Endpoint, code: u16) -> io::Result<Button> {
             break dimensions;
         }
         if Instant::now() >= deadline {
-            return Err(io::Error::other(
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
                 "Gamescope did not produce a bounded screenshot; no click sent",
             ));
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    let output = scratch.0.join("ocr");
+    let ocr_deadline = Instant::now() + Duration::from_millis(1800);
+    let normal = ocr(&scratch.0, &frame, "ocr", false, ocr_deadline)?;
+    match detect_button(&normal, dimensions.0, dimensions.1, code) {
+        Ok(button) => Ok(button),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            // A white Reconnect button on a dark dialog can disappear in the
+            // default global threshold. Read the SAME frame adaptively too;
+            // preserve the confidence, error-code, and uniqueness checks.
+            let adaptive = ocr(&scratch.0, &frame, "adaptive", true, ocr_deadline)?;
+            detect_readings(&[&normal, &adaptive], dimensions.0, dimensions.1, code)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn ocr(
+    directory: &Path,
+    frame: &Path,
+    name: &str,
+    adaptive: bool,
+    deadline: Instant,
+) -> io::Result<String> {
+    let output = directory.join(name);
     let mut command = Command::new("/usr/bin/tesseract");
     command
-        .arg(&frame)
+        .arg(frame)
         .arg(&output)
-        .args(["-l", "eng", "--psm", "11", "tsv"]);
-    run_bounded(&mut command, Duration::from_millis(1800))?;
-    let mut file = File::open(scratch.0.join("ocr.tsv"))?;
+        .args(["-l", "eng", "--psm", "11"]);
+    if adaptive {
+        command.args(["-c", "thresholding_method=1"]);
+    }
+    command.arg("tsv");
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::TimedOut, "OCR budget expired; no click sent")
+        })?;
+    run_bounded(&mut command, remaining)?;
+    let mut file = File::open(directory.join(format!("{name}.tsv")))?;
     if file.metadata()?.len() > 512 * 1024 {
         return Err(io::Error::other("OCR output exceeded the limit"));
     }
     let mut tsv = String::new();
     file.read_to_string(&mut tsv)?;
-    detect_button(&tsv, dimensions.0, dimensions.1, code)
+    Ok(tsv)
 }
 
 fn png_dimensions(path: &Path) -> io::Result<(u32, u32)> {
@@ -283,6 +325,22 @@ fn png_dimensions(path: &Path) -> io::Result<(u32, u32)> {
 }
 
 pub fn detect_button(tsv: &str, width: u32, height: u32, code: u16) -> io::Result<Button> {
+    detect_readings(&[tsv], width, height, code)
+}
+
+fn merge_label(labels: &mut Vec<Button>, incoming: Button) {
+    // Only coalesce readings of the same label BETWEEN threshold passes.
+    if !labels.iter().any(|known| {
+        known.x.abs_diff(incoming.x) <= 4
+            && known.y.abs_diff(incoming.y) <= 4
+            && known.width.abs_diff(incoming.width) <= 8
+            && known.height.abs_diff(incoming.height) <= 4
+    }) {
+        labels.push(incoming);
+    }
+}
+
+fn detect_readings(readings: &[&str], width: u32, height: u32, code: u16) -> io::Result<Button> {
     let invalid = || {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -295,60 +353,88 @@ pub fn detect_button(tsv: &str, width: u32, height: u32, code: u16) -> io::Resul
     let mut reconnect = Vec::new();
     let mut leave = Vec::new();
     let mut headings = Vec::new();
-    let mut text = String::new();
-    for line in tsv.lines().skip(1) {
-        if line.len() > 2048 {
+    let mut matching_code = false;
+    for tsv in readings {
+        let mut text = String::new();
+        let mut pass_reconnect = Vec::new();
+        let mut pass_leave = Vec::new();
+        let mut pass_headings = Vec::new();
+        for line in tsv.lines().skip(1) {
+            if line.len() > 2048 {
+                return Err(invalid());
+            }
+            let fields: Vec<_> = line.splitn(12, '\t').collect();
+            if fields.len() != 12 || fields[0] != "5" {
+                continue;
+            }
+            let confidence: f32 = fields[10].parse().map_err(|_| invalid())?;
+            if !confidence.is_finite() || confidence < 75.0 {
+                continue;
+            }
+            let normalized: String = fields[11]
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .flat_map(char::to_lowercase)
+                .collect();
+            text.push_str(&normalized);
+            if text.len() > 64 * 1024 {
+                return Err(invalid());
+            }
+            if !matches!(normalized.as_str(), "reconnect" | "leave" | "disconnected") {
+                continue;
+            }
+            let n: Vec<u32> = fields[6..10]
+                .iter()
+                .map(|s| s.parse().map_err(|_| invalid()))
+                .collect::<io::Result<_>>()?;
+            let button = Button {
+                x: n[0],
+                y: n[1],
+                width: n[2],
+                height: n[3],
+            };
+            if button.width == 0
+                || button.height == 0
+                || button.x.saturating_add(button.width) > width
+                || button.y.saturating_add(button.height) > height
+            {
+                return Err(invalid());
+            }
+            match normalized.as_str() {
+                "reconnect" => pass_reconnect.push(button),
+                "leave" => pass_leave.push(button),
+                _ => pass_headings.push(button),
+            }
+        }
+        if pass_reconnect.len() > 1 || pass_leave.len() > 1 || pass_headings.len() > 1 {
             return Err(invalid());
         }
-        let fields: Vec<_> = line.splitn(12, '\t').collect();
-        if fields.len() != 12 || fields[0] != "5" {
-            continue;
+        for label in pass_reconnect {
+            merge_label(&mut reconnect, label);
         }
-        let confidence: f32 = fields[10].parse().map_err(|_| invalid())?;
-        if !confidence.is_finite() || confidence < 75.0 {
-            continue;
+        for label in pass_leave {
+            merge_label(&mut leave, label);
         }
-        let normalized: String = fields[11]
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .flat_map(char::to_lowercase)
-            .collect();
-        text.push_str(&normalized);
-        if text.len() > 64 * 1024 {
-            return Err(invalid());
+        for label in pass_headings {
+            merge_label(&mut headings, label);
         }
-        if !matches!(normalized.as_str(), "reconnect" | "leave" | "disconnected") {
-            continue;
-        }
-        let n: Vec<u32> = fields[6..10]
-            .iter()
-            .map(|s| s.parse().map_err(|_| invalid()))
-            .collect::<io::Result<_>>()?;
-        let button = Button {
-            x: n[0],
-            y: n[1],
-            width: n[2],
-            height: n[3],
-        };
-        if button.width == 0
-            || button.height == 0
-            || button.x.saturating_add(button.width) > width
-            || button.y.saturating_add(button.height) > height
-        {
-            return Err(invalid());
-        }
-        match normalized.as_str() {
-            "reconnect" => reconnect.push(button),
-            "leave" => leave.push(button),
-            _ => headings.push(button),
+        matching_code |= text.contains(&format!("errorcode{code}"));
+        for other in [266, 277, 278] {
+            if other != code && text.contains(&format!("errorcode{other}")) {
+                return Err(invalid());
+            }
         }
     }
-    if reconnect.len() != 1
-        || leave.len() != 1
-        || headings.len() != 1
-        || !text.contains(&format!("errorcode{code}"))
-    {
-        return Err(invalid());
+    if reconnect.len() != 1 || leave.len() != 1 || headings.len() != 1 || !matching_code {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "disconnect dialog not verified (heading={}, Leave={}, Reconnect={}, matching code={matching_code}); no click sent",
+                headings.len(),
+                leave.len(),
+                reconnect.len()
+            ),
+        ));
     }
     let target = reconnect.remove(0);
     let left = &leave[0];
@@ -478,6 +564,10 @@ mod tests {
         assert_eq!(budget.next_delay().unwrap(), 30_000);
         budget.observe(120_000, false);
         assert_eq!(budget.next_delay().unwrap(), 60_000);
+        for attempt in 4..=MAX_ATTEMPTS {
+            assert_eq!(budget.next_delay().unwrap(), 60_000);
+            assert_eq!(budget.attempt(), attempt);
+        }
         assert!(budget.next_delay().is_err());
         budget.observe(200_000, true);
         budget.observe(320_000, true);
@@ -485,5 +575,71 @@ mod tests {
         for code in [267, 285, 268, 0, 999] {
             assert!(!recoverable(code));
         }
+    }
+
+    #[test]
+    fn recognition_misses_consume_all_ten_attempts_without_allowing_a_click() {
+        let mut budget = RetryBudget::default();
+        let invalid = fixture().replace("Reconnect", "Unreadable");
+        for attempt in 1..=MAX_ATTEMPTS {
+            budget.next_delay().unwrap();
+            let error = detect_button(&invalid, 800, 600, 277).unwrap_err();
+            assert!(retryable_recognition(error.kind(), false));
+            assert!(!retryable_recognition(error.kind(), true));
+            assert_eq!(budget.attempt(), attempt);
+        }
+        assert!(
+            budget
+                .next_delay()
+                .unwrap_err()
+                .to_string()
+                .contains("10 attempts")
+        );
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::Other,
+        ] {
+            assert!(!retryable_recognition(kind, false));
+        }
+        assert!(retryable_recognition(io::ErrorKind::TimedOut, false));
+    }
+
+    #[test]
+    fn complementary_thresholds_recognize_a_white_button_on_a_dark_dialog() {
+        // Sanitized label-only OCR output from the reported 800x600 dialog.
+        // Global thresholding read the heading, code, and Leave but missed the
+        // Reconnect label; adaptive Otsu read Reconnect at high confidence.
+        let header = fixture().lines().next().unwrap().to_owned();
+        let normal = format!(
+            "{header}\n\
+            5\t1\t1\t1\t1\t1\t343\t193\t115\t15\t90.830803\tDisconnected\n\
+            5\t1\t1\t1\t1\t1\t343\t302\t37\t15\t82.279396\t(Error\n\
+            5\t1\t1\t1\t1\t1\t387\t302\t38\t12\t92.177711\tCode:\n\
+            5\t1\t1\t1\t1\t1\t430\t302\t27\t15\t90.481079\t277)\n\
+            5\t1\t1\t1\t1\t1\t290\t382\t38\t11\t93.030396\tLeave\n\
+            5\t1\t1\t1\t1\t1\t494\t385\t13\t8\t24.901749\tnn;\n"
+        );
+        let adaptive =
+            format!("{header}\n5\t1\t1\t1\t1\t1\t459\t382\t69\t11\t92.552551\tReconnect\n");
+        assert!(detect_button(&normal, 800, 600, 277).is_err());
+        assert!(detect_button(&adaptive, 800, 600, 277).is_err());
+        let button = detect_readings(&[&normal, &adaptive], 800, 600, 277).unwrap();
+        assert_eq!(button.center(), (493, 387));
+        assert!(detect_readings(&[&normal, &adaptive], 800, 600, 278).is_err());
+        let low_confidence = adaptive.replace("92.552551", "30");
+        assert!(detect_readings(&[&normal, &low_confidence], 800, 600, 277).is_err());
+    }
+
+    #[test]
+    fn threshold_passes_coalesce_only_agreeing_labels_and_reject_conflicts() {
+        let normal = fixture();
+        assert!(detect_readings(&[&normal, &normal], 800, 600, 277).is_ok());
+        let moved = normal.replace("\t440\t340\t", "\t480\t340\t");
+        assert!(detect_readings(&[&normal, &moved], 800, 600, 277).is_err());
+        let other_code = normal.replace("277)", "278)");
+        assert!(detect_readings(&[&normal, &other_code], 800, 600, 277).is_err());
+        let duplicate = format!("{normal}5\t1\t1\t1\t1\t1\t440\t340\t100\t20\t95\tReconnect\n");
+        assert!(detect_readings(&[&normal, &duplicate], 800, 600, 277).is_err());
     }
 }

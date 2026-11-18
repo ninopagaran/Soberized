@@ -8,7 +8,7 @@ cookies, or authentication tickets are required.
 
 Install the matching current CLI/helper using the
 [update guide](INSTALLATION.md). The user-session frontend needs `libei`; dialog
-recognition also needs Gamescope's control utility, Tesseract, and English data:
+recognition also needs Gamescope's control utility, Tesseract 5+, and English data:
 
 ```sh
 sudo pacman -S --needed gamescope libei tesseract tesseract-data-eng
@@ -48,7 +48,8 @@ rotated log, a changed Flatpak instance, suspend, or lease loss stops input.
 
 On an eligible disconnect, the helper immediately pauses scheduled movement and
 neutralizes its existing controller. It retains the same leased device during
-recovery. Attempts wait 15, 30, then 60 seconds, with at most three attempts.
+recovery. There are at most ten attempts: wait 15 seconds before the first,
+30 seconds before the second, and 60 seconds before each remaining attempt.
 Two minutes of observed client connection state reset the retry budget; a brief
 join followed by another disconnect does not reset it.
 
@@ -68,14 +69,22 @@ remote-control portals are not used. The helper's kernel device stays gamepad-on
 The existing Gamescope window stays open; the program does not relaunch Sober or
 switch host workspaces.
 
+OCR first uses global thresholding and, when needed, an adaptive pass on the
+same image to read light buttons on a dark dialog. Both passes share a total
+1.8-second OCR budget. Labels must still meet the original confidence threshold;
+conflicting labels or error codes are rejected.
+
 Images and OCR output are removed after each inspection. Neither is journaled.
 Abrupt termination can leave private capture files in the user runtime directory
 until its cleanup at logout/reboot.
 Coordinates come from the detected text, with no resolution or cursor-position
 configuration. Images larger than 4096×2160 or 32 MiB, ambiguous labels, changed
-layouts, low-confidence OCR, unsupported languages, and capture failures stop
-recovery without a click. This recognition is a heuristic, not proof that a UI
-is trustworthy.
+layouts, low-confidence OCR, and unsupported languages never result in a click.
+Recognition misses, changed targets, and capture/OCR timeouts consume an attempt
+and retry while movement stays paused. Exhausting ten attempts stops recovery;
+client/lease/log errors, socket identity changes, missing dependencies, and manual
+leaves still stop it immediately. Recognition is a heuristic, not proof that a
+UI is trustworthy.
 
 After a click, the worker waits up to 90 seconds for a new join followed by a
 fresh client network marker. Movement stays paused during this wait. A join
@@ -117,9 +126,11 @@ journalctl -u soberized-helper.service -b --no-pager
 
 On the target Sway host, the Gamescope peer binding and libei sender handshake
 passed without sending input. Capture/OCR also completed on the real client and
-rejected its ordinary game screen. Actual recognition of a disconnect dialog,
-click delivery, and unattended reconnect still require a live trial. The normal
-hidden-workspace anti-idle trial does not validate this new feature.
+rejected its ordinary game screen. A captured 800×600 code-277 dialog exposed a
+global-threshold OCR miss on the light Reconnect button; its sanitized label-only
+regression now passes using the complementary adaptive reading without lowering
+confidence. Click delivery and unattended reconnect still require a live trial.
+The normal hidden-workspace anti-idle trial does not validate this new feature.
 
 ## Primary references
 
@@ -127,3 +138,4 @@ hidden-workspace anti-idle trial does not validate this new feature.
 - [Gamescope screenshot control](https://github.com/ValveSoftware/gamescope/blob/3.17.0/src/steamcompmgr.cpp)
 - [libei sender API](https://libinput.pages.freedesktop.org/libei/api/)
 - [Tesseract command line](https://tesseract-ocr.github.io/tessdoc/Command-Line-Usage.html)
+- [Tesseract image quality and thresholding](https://tesseract-ocr.github.io/tessdoc/ImproveQuality.html)

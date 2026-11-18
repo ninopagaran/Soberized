@@ -198,8 +198,15 @@ bounds, output size, subprocess timeouts, and image dimensions are checked. The
 input sender requests absolute pointer/button capabilities and sends only a
 bounded left click at the detected label. Client instance, disconnect reason,
 log generation, and Gamescope ancestry are checked again before the click.
-The retries are limited to three, with increasing delays. Input stops on
-recognition failure, incompatible UI, client loss, or cancellation.
+The retries are limited to ten, with delays of 15 seconds, 30 seconds, and then
+60 seconds per attempt. Recognition misses, changing targets, and capture/OCR
+timeouts consume an attempt without clicking; movement remains paused. Client,
+lease, log, and socket identity errors still stop recovery immediately.
+
+Recognition can combine global and adaptive Otsu readings of the same image,
+within one 1.8-second OCR budget. The confidence threshold is unchanged. Only
+agreeing label locations are coalesced across passes; multiple labels within a
+pass, conflicting locations, and conflicting error codes are rejected.
 
 These are heuristic safeguards. A matching log/dialog does not prove that a
 server is live or the screen is authentic, and a UI change between checking and
@@ -214,8 +221,9 @@ runtime opt-in file is fixed-format, owner-only, read without following symlinks
 and cleared by the stop command. It is not a shell or environment file.
 
 See [reconnect setup and validation](docs/RECONNECT.md). The read-only handshake
-and real-client capture/OCR negative test passed on the target host. Live dialog
-recognition, click delivery, and unattended reconnect are still pending.
+and real-client capture/OCR negative test passed on the target host. The reported
+dialog's sanitized OCR regression passes with complementary thresholding. Live
+click delivery and unattended reconnect are still pending.
 
 ## Review and release checks
 

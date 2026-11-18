@@ -188,7 +188,10 @@ fn status() -> io::Result<()> {
     let session = units::query(true, USER_UNIT)?;
     let controller = unit_active(true, USER_UNIT);
     if controller && reconnect::enabled()? {
-        println!("Auto-reconnect: enabled (Gamescope dialog recognition; up to three attempts).");
+        println!(
+            "Auto-reconnect: enabled (Gamescope dialog recognition; up to {} attempts).",
+            reconnect::MAX_ATTEMPTS
+        );
     }
     let response = if unit_active(false, HELPER_UNIT) {
         Some(Client::connect(Path::new(SOCKET_PATH))?.command(Operation::Status)?)
@@ -575,6 +578,19 @@ fn recovery_observe(
     )? == reconnect::Observation::Reconnected)
 }
 
+fn recognition_failure(error: io::Error, attempt: usize, diagnostic: bool) -> io::Result<()> {
+    if !reconnect::retryable_recognition(error.kind(), diagnostic) {
+        return Err(error);
+    }
+    let message = format!(
+        "Reconnecting: attempt {attempt}/{} could not verify the dialog; no click sent: {error}",
+        reconnect::MAX_ATTEMPTS
+    );
+    notify::status(&message)?;
+    eprintln!("{message}");
+    Ok(())
+}
+
 fn recover(
     lease: &mut SessionLease,
     target: &sober::Instance,
@@ -587,12 +603,14 @@ fn recover(
         reconnect::dependencies()?;
         let endpoint = gamescope_input::Endpoint::locate(target)?;
         let baseline = (monitor.connection_revision(), monitor.generation());
-        loop {
+        let limit = if test { 1 } else { reconnect::MAX_ATTEMPTS };
+        'attempts: loop {
             let backoff = retries.next_delay()?;
             let delay = if test { 10_000 } else { backoff };
             let message = format!(
-                "Reconnecting: attempt {}/3 in {}s; movement paused, waiting for a matching dialog",
+                "Reconnecting: attempt {}/{} in {}s; movement paused, waiting for a matching dialog",
                 retries.attempt(),
+                limit,
                 delay / 1_000
             );
             notify::status(&message)?;
@@ -616,18 +634,33 @@ fn recover(
                 }
             };
             endpoint.verify(target)?;
-            let first = reconnect::find_button(&endpoint, code)?;
-            if recovery_observe(lease, target, monitor, baseline, test)? {
-                return Ok(());
+            let mut captures = Vec::with_capacity(2);
+            for _ in 0..2 {
+                let button = match reconnect::find_button(&endpoint, code) {
+                    Ok(button) => button,
+                    Err(error) => {
+                        recognition_failure(error, retries.attempt(), test)?;
+                        continue 'attempts;
+                    }
+                };
+                captures.push(button);
+                // Lease, log and client identity errors are fatal regardless of
+                // their ErrorKind. Only capture/recognition errors may retry.
+                if recovery_observe(lease, target, monitor, baseline, test)? {
+                    return Ok(());
+                }
             }
-            let second = reconnect::find_button(&endpoint, code)?;
-            if first != second {
-                return Err(io::Error::other(
-                    "disconnect dialog changed between captures; no click sent",
-                ));
-            }
-            if recovery_observe(lease, target, monitor, baseline, test)? {
-                return Ok(());
+            let second = captures.pop().unwrap();
+            if captures[0] != second {
+                recognition_failure(
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "disconnect dialog changed between captures; no click sent",
+                    ),
+                    retries.attempt(),
+                    test,
+                )?;
+                continue;
             }
             if !matches!(monitor.latest(), Some(roblox_log::Event::Disconnected { code: current, .. }) if *current == code)
             {
