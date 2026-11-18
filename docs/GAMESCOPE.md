@@ -148,6 +148,15 @@ desktop mouse/typing after switching workspaces. Treat a failed release as a
 failed compatibility test. The earlier 30-minute success used the standard
 profile and does not independently validate the capture profile.
 
+On the target Arch/Sway host, the local **0.4.2 launcher** successfully launched
+this profile with the compatible installed 0.4.0 controller/helper. Process
+arguments confirmed cursor capture enabled and keyboard grabbing absent. The
+user then confirmed that **camera rotation, menus, and desktop mouse use after
+switching workspaces all work**. The virtual controller remained neutral until
+the game join, then armed normally. No system binaries were replaced for this
+test; install the built 0.4.2 release before using the flag with the installed
+command. The capture profile has not yet completed its own unattended idle trial.
+
 ## Vulkan startup failure
 
 For this AMD machine, fix the missing driver and retry the already installed

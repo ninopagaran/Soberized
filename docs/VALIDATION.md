@@ -75,6 +75,23 @@ confirmation. Overnight, scratchpad, other-experience, and other-machine results
 are not established. The 0.4.1 startup fix was built and passed all 41 available
 Rust tests separately; it was not installed during this trial.
 
+## Mouse capture compatibility: 0.4.2
+
+After the idle trial, the user reported that menu clicks and keyboard movement
+worked but right-button dragging locked the pointer without rotating the camera.
+A fresh launch of the normal Gamescope profile reproduced that behavior.
+
+The local 0.4.2 launcher added the explicit `--gamescope --capture-mouse` profile
+and launched it with installed compatible 0.4.0 services. Gamescope's arguments
+included `--force-grab-cursor` and no keyboard grab. The user confirmed camera
+rotation, menus, and normal desktop mouse behavior after switching Sway
+workspaces. All 41 Rust tests and host checks passed for the new release.
+
+This passes the manual camera/menu/release checks for that run. The capture
+profile is opt-in, and its unattended idle behavior remains separate from the
+earlier 30-minute standard-profile result. The built release still needs to be
+installed for subsequent launches through `/usr/bin/soberized`.
+
 ## 1. Before creating a controller
 
 Run as the desktop user:

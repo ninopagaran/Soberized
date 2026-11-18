@@ -141,9 +141,10 @@ Gamescope's `--force-grab-cursor` relative-mouse mode. The standard profile does
 not request this capture. This is a compositor pointer lock, controlled by the
 host Wayland compositor, not an added uinput mouse capability. It can confine the
 pointer while using the Gamescope window. The host's workspace shortcuts remain
-available because keyboard grabbing is not requested. Actual pointer release
-on workspace/focus change must be validated; do not claim background mouse
-non-interference for the capture profile until that check passes.
+available because keyboard grabbing is not requested. On the target Sway host,
+the user confirmed camera/menu input and normal desktop mouse use after switching
+workspaces. This is a manual result for that run; pointer release on other
+systems and unattended background behavior still need validation.
 
 The original helper's identity, syscall filter, device capabilities, protocol,
 timing, and lease rules are unchanged. The virtual controller remains visible

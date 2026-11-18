@@ -42,8 +42,10 @@ If menu clicks work but right-dragging locks the cursor without rotating the
 camera, version 0.4.2 offers an explicit camera-capture profile:
 `soberized launch --gamescope --capture-mouse`. It can keep the pointer captured
 inside Gamescope. Use your Sway workspace shortcut to leave, and validate pointer
-release before relying on this mode. Capture is off by default; its mouse and
-background behavior must be validated separately from the earlier 30-minute run.
+release before relying on this mode. The user confirmed camera rotation, menu
+interaction, and normal desktop mouse use after switching workspaces in the live
+capture-profile test. Capture is off by default; its unattended background
+behavior still needs validation separately from the earlier 30-minute run.
 
 ## Security design
 
